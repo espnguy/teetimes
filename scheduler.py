@@ -61,6 +61,7 @@ class TeeTimeScheduler:
             "course_url": data["course_url"],
             "course_id": info["course_id"],
             "schedule_id": info["schedule_id"],
+            "booking_class": info.get("booking_class", ""),
             "target_date": data["target_date"],       # MM-DD-YYYY
             "time_from": data["time_from"],            # HH:MM
             "time_to": data["time_to"],                # HH:MM
@@ -151,6 +152,7 @@ class TeeTimeScheduler:
                 time_to=job["time_to"],
                 players=job["players"],
                 holes=job.get("holes", 18),
+                booking_class=job.get("booking_class", ""),
             )
 
             now_str = datetime.now().strftime("%H:%M:%S")

@@ -7,6 +7,7 @@ import os
 import logging
 from flask import Flask, render_template, jsonify, request, redirect, url_for
 from foreup_client import ForeUpClient, parse_course_url
+from course_resolver import resolve_course_from_url, load_courses, save_course, delete_course
 from scheduler import TeeTimeScheduler
 from notifier import notify_test
 from config import load_config, save_config, credentials_from_env
@@ -16,10 +17,6 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 scheduler = TeeTimeScheduler()
-
-# Start the polling thread immediately when the module is imported.
-# This works for both `python app.py` and gunicorn (which imports this module).
-# The scheduler is thread-safe and start() is idempotent.
 scheduler.start()
 logger.info("Scheduler started at module load")
 
@@ -30,7 +27,12 @@ logger.info("Scheduler started at module load")
 def index():
     cfg = load_config()
     jobs = scheduler.get_all_jobs()
-    return render_template("index.html", config=cfg, jobs=jobs, env_creds=credentials_from_env())
+    courses = load_courses()
+    return render_template("index.html",
+                           config=cfg,
+                           jobs=jobs,
+                           courses=courses,
+                           env_creds=credentials_from_env())
 
 
 @app.route("/config", methods=["POST"])
@@ -42,7 +44,53 @@ def update_config():
     return redirect(url_for("index"))
 
 
-# ─── API Endpoints ────────────────────────────────────────────────────────────
+# ─── Course API ───────────────────────────────────────────────────────────────
+
+@app.route("/api/resolve_course", methods=["POST"])
+def resolve_course():
+    """Auto-detect schedule_id and booking_class from a booking URL, save to library."""
+    data = request.json
+    url = data.get("url", "").strip()
+    if not url:
+        return jsonify({"error": "URL is required"}), 400
+    try:
+        info = resolve_course_from_url(url)
+        return jsonify(info)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/api/courses")
+def get_courses():
+    return jsonify(load_courses())
+
+
+@app.route("/api/courses/<course_id>", methods=["PUT"])
+def update_course(course_id):
+    """Manually save or update a course (for when auto-detect fails)."""
+    data = request.json
+    required = ["schedule_id", "booking_class", "name"]
+    for f in required:
+        if not data.get(f):
+            return jsonify({"error": f"Missing: {f}"}), 400
+    info = {
+        "course_id": course_id,
+        "schedule_id": data["schedule_id"],
+        "booking_class": data["booking_class"],
+        "name": data["name"],
+        "url": data.get("url", f"https://foreupsoftware.com/index.php/booking/{course_id}"),
+    }
+    save_course(course_id, info)
+    return jsonify({"success": True, "course": info})
+
+
+@app.route("/api/courses/<course_id>", methods=["DELETE"])
+def remove_course(course_id):
+    delete_course(course_id)
+    return jsonify({"success": True})
+
+
+# ─── Job API ──────────────────────────────────────────────────────────────────
 
 @app.route("/api/add_job", methods=["POST"])
 def add_job():
@@ -52,8 +100,14 @@ def add_job():
         if not data.get(field):
             return jsonify({"error": f"Missing field: {field}"}), 400
     try:
+        # Auto-resolve course IDs (uses cache if already saved)
+        course = resolve_course_from_url(data["course_url"])
+        data["course_id"]     = course["course_id"]
+        data["schedule_id"]   = course["schedule_id"]
+        data["booking_class"] = course["booking_class"]
+        data["course_name"]   = course["name"]
         job_id = scheduler.add_job(data)
-        return jsonify({"success": True, "job_id": job_id})
+        return jsonify({"success": True, "job_id": job_id, "course": course})
     except Exception as e:
         logger.exception("add_job failed")
         return jsonify({"error": str(e)}), 500
@@ -85,6 +139,7 @@ def get_available_times(job_id):
             time_from=job["time_from"],
             time_to=job["time_to"],
             players=int(job["players"]),
+            booking_class=job.get("booking_class", ""),
         )
         return jsonify({"times": times})
     except Exception as e:
@@ -97,14 +152,11 @@ def book_tee_time():
     data = request.json
     job_id = data.get("job_id")
     time_data = data.get("time_data")
-
     if not job_id or not time_data:
         return jsonify({"error": "Missing job_id or time_data"}), 400
-
     job = scheduler.get_job(job_id)
     if not job:
         return jsonify({"error": "Job not found"}), 404
-
     cfg = load_config()
     try:
         client = ForeUpClient(cfg.get("email"), cfg.get("password"))
@@ -113,6 +165,7 @@ def book_tee_time():
             schedule_id=job["schedule_id"],
             time_data=time_data,
             players=int(job["players"]),
+            booking_class=job.get("booking_class", ""),
         )
         scheduler.mark_job_booked(job_id, result)
         return jsonify({"success": True, "confirmation": result})
@@ -144,17 +197,6 @@ def test_login():
         return jsonify({"success": False, "message": str(e)}), 401
 
 
-@app.route("/api/resolve_course", methods=["POST"])
-def resolve_course():
-    data = request.json
-    url = data.get("url", "")
-    try:
-        info = parse_course_url(url)
-        return jsonify(info)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 400
-
-
 @app.route("/api/logs/<job_id>")
 def get_job_logs(job_id):
     return jsonify(scheduler.get_job_logs(job_id))
@@ -162,7 +204,6 @@ def get_job_logs(job_id):
 
 @app.route("/api/scheduler_status")
 def scheduler_status():
-    """Quick health check — confirms the polling thread is alive."""
     alive = scheduler._thread is not None and scheduler._thread.is_alive()
     jobs = scheduler.get_all_jobs()
     return jsonify({

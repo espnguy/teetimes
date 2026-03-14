@@ -1,17 +1,13 @@
 """
 ForeUp HTTP client.
 
-ForeUp doesn't publish a public API, but the booking UI makes standard
-JSON calls that we can replicate with requests + a session cookie.
-
-Endpoints discovered via browser DevTools on foreupsoftware.com:
-  GET  /api/booking/19536/times        → available tee times
-  POST /api/booking/19536/reserve      → reserve a tee time
-  POST /index.php/user/login           → authenticate
+Endpoints confirmed via browser DevTools on foreupsoftware.com/index.php/booking/19536:
+  POST /index.php/api/booking/users/login       → authenticate
+  GET  /index.php/api/booking/times             → available tee times
+  POST /index.php/api/booking/pending_reservation → reserve a tee time
 """
 
 import re
-import json
 import logging
 import requests
 from urllib.parse import urlparse, parse_qs
@@ -29,46 +25,65 @@ HEADERS = {
     ),
     "X-Requested-With": "XMLHttpRequest",
     "Accept": "application/json, text/javascript, */*; q=0.01",
+    "Referer": "https://foreupsoftware.com/",
 }
 
 
 def parse_course_url(url: str) -> dict:
     """
-    Extract course_id and schedule_id from a ForeUp booking URL.
+    Extract course_id, schedule_id, and booking_class from a ForeUp booking URL.
 
     Supported formats:
       https://foreupsoftware.com/index.php/booking/19536
-      https://foreupsoftware.com/index.php/booking/19536/21234
-      ...#/teetimes
+      https://foreupsoftware.com/index.php/booking/19536/1832
+      https://foreupsoftware.com/index.php/api/booking/times?schedule_id=1832&booking_class=12800&...
     """
-    # Strip fragment
-    url = url.split("#")[0].rstrip("/")
-    parts = url.split("/")
+    # Pull query params before stripping them
+    parsed = urlparse(url)
+    qs = parse_qs(parsed.query)
 
-    # Find 'booking' index
-    try:
-        idx = parts.index("booking")
-    except ValueError:
-        raise ValueError("URL does not appear to be a ForeUp booking URL (no '/booking/' segment found)")
+    clean_url = url.split("#")[0].rstrip("/").split("?")[0]
+    parts = clean_url.split("/")
 
-    try:
-        course_id = parts[idx + 1]
-    except IndexError:
-        raise ValueError("Could not extract course_id from URL")
+    # Try to find booking segment
+    course_id = None
+    schedule_id = None
+    for key in ("booking",):
+        if key in parts:
+            idx = parts.index(key)
+            try:
+                candidate = parts[idx + 1]
+                if candidate.isdigit():
+                    course_id = candidate
+                    next_seg = parts[idx + 2] if len(parts) > idx + 2 else ""
+                    if next_seg.isdigit():
+                        schedule_id = next_seg
+            except IndexError:
+                pass
 
-    # schedule_id may be the next segment
-    try:
-        schedule_id = parts[idx + 2] if len(parts) > idx + 2 else course_id
-    except IndexError:
-        schedule_id = course_id
+    # Fall back to query params (e.g. pasted from DevTools)
+    if not course_id:
+        course_id = (qs.get("booking_class", [None])[0] or
+                     qs.get("course_id", [None])[0])
 
-    # Validate they look like numeric IDs
-    if not course_id.isdigit():
-        raise ValueError(f"Unexpected course_id format: {course_id}")
+    if not course_id:
+        raise ValueError(
+            "Could not extract course ID from URL. "
+            "Please paste the booking page URL, e.g. "
+            "https://foreupsoftware.com/index.php/booking/19536"
+        )
+
+    # schedule_id from path, or query param
+    if not schedule_id:
+        schedule_id = (qs.get("schedule_id", [None])[0] or course_id)
+
+    # booking_class from query params or fall back to course_id
+    booking_class = qs.get("booking_class", [None])[0] or ""
 
     return {
         "course_id": course_id,
         "schedule_id": schedule_id,
+        "booking_class": booking_class,
         "booking_base": f"{BASE}/index.php/booking/{course_id}",
     }
 
@@ -82,24 +97,28 @@ class ForeUpClient:
         self.session = requests.Session()
         self.session.headers.update(HEADERS)
         self._logged_in = False
+        self._customer_id = None
 
-    # ── Auth ─────────────────────────────────────────────────────────────────
+    # ── Auth ──────────────────────────────────────────────────────────────────
 
     def login(self):
-        """Authenticate and store the session cookie."""
-        url = f"{BASE}/index.php/user/login"
+        url = f"{BASE}/index.php/api/booking/users/login"
         payload = {
             "email": self.email,
             "password": self.password,
-            "api_key": "no_limits",  # public key used by the ForeUp booking widget
+            "api_key": "no_limits",
         }
         resp = self.session.post(url, json=payload, timeout=15)
         _check_response(resp, "Login")
         data = resp.json()
-        if not data.get("player_id") and not data.get("token"):
-            raise ValueError(f"Login failed – ForeUp response: {data}")
+        # Accept any of the known ID fields
+        user_id = (data.get("player_id") or data.get("customer_id")
+                   or data.get("id") or data.get("token"))
+        if not user_id:
+            raise ValueError(f"Login failed – unexpected ForeUp response: {data}")
         self._logged_in = True
-        logger.info(f"Logged in as {self.email} (player_id={data.get('player_id')})")
+        self._customer_id = user_id
+        logger.info(f"Logged in as {self.email} (id={user_id})")
         return data
 
     def _ensure_logged_in(self):
@@ -113,25 +132,24 @@ class ForeUpClient:
         course_id: str,
         schedule_id: str,
         date: str,           # "MM-DD-YYYY"
-        time_from: str,      # "07:00"
-        time_to: str,        # "10:00"
+        time_from: str,      # "HH:MM"
+        time_to: str,        # "HH:MM"
         players: int = 2,
         holes: int = 18,
+        booking_class: str = "",
     ) -> list[dict]:
-        """
-        Returns a filtered list of available tee time dicts.
-        Each dict contains: time, available_spots, green_fee, holes, time_id, etc.
-        """
         self._ensure_logged_in()
 
-        url = f"{BASE}/api/booking/{course_id}/times"
+        url = f"{BASE}/index.php/api/booking/times"
         params = {
-            "date": date,              # MM-DD-YYYY
             "time": "all",
+            "date": date,
             "holes": str(holes),
             "players": str(players),
+            "booking_class": booking_class or course_id,
             "schedule_id": schedule_id,
-            "schedule": schedule_id,
+            "schedule_ids[]": schedule_id,
+            "specials_only": "0",
             "api_key": "no_limits",
         }
 
@@ -140,7 +158,7 @@ class ForeUpClient:
 
         all_times = resp.json()
         if not isinstance(all_times, list):
-            raise ValueError(f"Unexpected API response: {all_times}")
+            raise ValueError(f"Unexpected tee times response: {all_times}")
 
         # Filter by time window
         from_minutes = _time_to_minutes(time_from)
@@ -148,16 +166,15 @@ class ForeUpClient:
 
         filtered = []
         for slot in all_times:
-            slot_time = slot.get("time", "")
-            slot_minutes = _parse_slot_time(slot_time)
+            slot_minutes = _parse_slot_time(str(slot.get("time", "")))
             if slot_minutes is None:
                 continue
             if from_minutes <= slot_minutes <= to_minutes:
                 filtered.append(slot)
 
         logger.info(
-            f"Fetched {len(all_times)} times for course {course_id} on {date}, "
-            f"{len(filtered)} match window {time_from}–{time_to}"
+            f"Fetched {len(all_times)} times for schedule {schedule_id} on {date}, "
+            f"{len(filtered)} in window {time_from}–{time_to}"
         )
         return filtered
 
@@ -169,20 +186,17 @@ class ForeUpClient:
         schedule_id: str,
         time_data: dict,
         players: int = 2,
+        booking_class: str = "",
     ) -> dict:
-        """
-        POSTs a reservation for the given time slot.
-        time_data should be one of the dicts returned by fetch_tee_times().
-        """
         self._ensure_logged_in()
 
-        url = f"{BASE}/api/booking/{course_id}/reserve"
+        url = f"{BASE}/index.php/api/booking/pending_reservation"
 
-        # Build the reservation payload from the slot data
         payload = {
             **time_data,
             "players": players,
             "carts": 0,
+            "booking_class": booking_class or course_id,
             "schedule_id": schedule_id,
             "api_key": "no_limits",
         }
@@ -207,27 +221,24 @@ def _check_response(resp: requests.Response, label: str):
 
 
 def _time_to_minutes(t: str) -> int:
-    """Convert 'HH:MM' to total minutes since midnight."""
     h, m = map(int, t.strip().split(":"))
     return h * 60 + m
 
 
 def _parse_slot_time(slot_time: str):
     """
-    Parse ForeUp's time field (can be '08:00:00', '8:00am', or epoch int/str)
-    into minutes since midnight.
+    Parse ForeUp time field into minutes since midnight.
+    Handles: 'HH:MM:SS', 'H:MMam', unix epoch int/str
     """
     if not slot_time:
         return None
     slot_time = str(slot_time).strip()
 
-    # HH:MM or HH:MM:SS
     m = re.match(r"^(\d{1,2}):(\d{2})", slot_time)
     if m:
         return int(m.group(1)) * 60 + int(m.group(2))
 
-    # Unix epoch (seconds)
-    if slot_time.isdigit():
+    if re.match(r"^\d{10,}$", slot_time):
         try:
             dt = datetime.fromtimestamp(int(slot_time))
             return dt.hour * 60 + dt.minute

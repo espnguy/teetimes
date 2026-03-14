@@ -223,12 +223,45 @@
     <!-- Add Job Form -->
     <div class="card">
       <h2>📅 Add Tee Time Watch</h2>
+
+      <!-- Saved Courses Dropdown -->
+      <div class="form-row" id="savedCourseRow" style="display:none">
+        <label>Saved Course <span style="font-weight:400;color:var(--gray)">(or paste a new URL below)</span></label>
+        <select id="savedCourseSelect" onchange="fillFromSaved(this.value)">
+          <option value="">— Pick a saved course —</option>
+        </select>
+      </div>
+
       <div class="form-row">
         <label>ForeUp Course URL</label>
         <input id="courseUrl" type="url" placeholder="https://foreupsoftware.com/index.php/booking/19536"
-               oninput="clearCourseInfo()">
-        <div id="courseInfo" style="font-size:.78rem;color:var(--green);margin-top:4px"></div>
+               oninput="onCourseUrlChange()">
+        <div id="courseInfo" style="font-size:.78rem;margin-top:4px"></div>
       </div>
+
+      <!-- Manual override (shown if auto-detect fails) -->
+      <div id="manualOverride" style="display:none;background:#fffbeb;border:1px solid #fcd34d;
+           border-radius:8px;padding:12px;margin-bottom:14px">
+        <div style="font-size:.82rem;font-weight:600;color:#92400e;margin-bottom:8px">
+          ⚠️ Could not auto-detect IDs. Enter them manually from the DevTools URL:
+        </div>
+        <div class="form-row-2">
+          <div>
+            <label>Schedule ID</label>
+            <input id="manualScheduleId" type="text" placeholder="e.g. 1832">
+          </div>
+          <div>
+            <label>Booking Class</label>
+            <input id="manualBookingClass" type="text" placeholder="e.g. 12800">
+          </div>
+        </div>
+        <div class="form-row">
+          <label>Course Name</label>
+          <input id="manualCourseName" type="text" placeholder="e.g. Stonebridge Ranch">
+        </div>
+        <button type="button" class="btn btn-outline btn-sm" onclick="saveManualCourse()">💾 Save This Course</button>
+      </div>
+
       <div class="form-row">
         <label>Target Date</label>
         <input id="targetDate" type="date">
@@ -266,7 +299,7 @@
       </button>
     </div>
 
-    <!-- How it works -->
+<!-- How it works -->
     <div class="card">
       <h2>ℹ️ How it works</h2>
       <ol style="padding-left:18px;line-height:2;font-size:.9rem;color:var(--gray)">
@@ -340,6 +373,37 @@
   </div>
 
 </div>
+
+
+  <!-- Saved Courses -->
+  <div class="card" style="margin-top:20px">
+    <h2>🏌️ Saved Courses</h2>
+    <div id="coursesList">
+      {% if courses %}
+        {% for cid, c in courses.items() %}
+        <div class="job-card" id="course-{{ cid }}" style="background:#f8faff">
+          <div class="job-header">
+            <div>
+              <div class="job-title">{{ c.name }}</div>
+              <div class="job-meta">
+                Course ID: {{ cid }} · Schedule ID: {{ c.schedule_id }} · Booking Class: {{ c.booking_class }}
+              </div>
+              <div class="job-meta" style="font-size:.75rem">{{ c.url }}</div>
+            </div>
+            <div class="job-actions">
+              <button class="btn btn-outline btn-sm" onclick="useCourse('{{ cid }}', '{{ c.url }}')">Use</button>
+              <button class="btn btn-danger btn-sm" onclick="deleteCourse('{{ cid }}')">✕</button>
+            </div>
+          </div>
+        </div>
+        {% endfor %}
+      {% else %}
+        <div class="empty-state">No saved courses yet. Add a watch and the course will be saved automatically.</div>
+      {% endif %}
+    </div>
+  </div>
+
+
 
 <!-- Confirmation Modal -->
 <div class="modal-backdrop" id="confirmModal">
@@ -449,6 +513,125 @@ async function resolveCourse() {
     }
   } catch(e) {}
 }
+
+
+// ── Course management ──────────────────────────────────────────────────────
+let resolvedCourse = null;
+let resolveTimeout = null;
+
+async function loadSavedCourses() {
+  try {
+    const res = await fetch('/api/courses');
+    const courses = await res.json();
+    const keys = Object.keys(courses);
+    const row = document.getElementById('savedCourseRow');
+    const sel = document.getElementById('savedCourseSelect');
+    if (keys.length > 0) {
+      row.style.display = 'block';
+      sel.innerHTML = '<option value="">— Pick a saved course —</option>' +
+        keys.map(id => `<option value="${id}">${courses[id].name}</option>`).join('');
+    } else {
+      row.style.display = 'none';
+    }
+  } catch(e) {}
+}
+loadSavedCourses();
+
+function fillFromSaved(courseId) {
+  if (!courseId) return;
+  fetch('/api/courses').then(r => r.json()).then(courses => {
+    const c = courses[courseId];
+    if (!c) return;
+    document.getElementById('courseUrl').value = c.url;
+    resolvedCourse = c;
+    const info = document.getElementById('courseInfo');
+    info.textContent = `✅ ${c.name} · Schedule: ${c.schedule_id} · Class: ${c.booking_class}`;
+    info.style.color = 'var(--green)';
+    document.getElementById('manualOverride').style.display = 'none';
+  });
+}
+
+function useCourse(courseId, url) {
+  document.getElementById('courseUrl').value = url;
+  document.getElementById('savedCourseSelect').value = courseId;
+  fillFromSaved(courseId);
+  // Scroll to add form
+  document.getElementById('courseUrl').scrollIntoView({behavior:'smooth', block:'center'});
+}
+
+function onCourseUrlChange() {
+  resolvedCourse = null;
+  document.getElementById('courseInfo').textContent = '';
+  document.getElementById('manualOverride').style.display = 'none';
+  clearTimeout(resolveTimeout);
+  resolveTimeout = setTimeout(resolveCourse, 700);
+}
+
+async function resolveCourse() {
+  const url = document.getElementById('courseUrl').value.trim();
+  if (!url || url.length < 20) return;
+  const info = document.getElementById('courseInfo');
+  info.textContent = '⏳ Looking up course...';
+  info.style.color = 'var(--gray)';
+  try {
+    const res = await fetch('/api/resolve_course', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ url })
+    });
+    const data = await res.json();
+    if (data.error) {
+      info.textContent = '⚠️ ' + data.error;
+      info.style.color = 'var(--red)';
+      document.getElementById('manualOverride').style.display = 'block';
+      return;
+    }
+    resolvedCourse = data;
+    info.textContent = `✅ ${data.name} · Schedule ID: ${data.schedule_id} · Booking Class: ${data.booking_class}`;
+    info.style.color = 'var(--green)';
+    document.getElementById('manualOverride').style.display = 'none';
+    loadSavedCourses(); // refresh dropdown
+  } catch(e) {
+    info.textContent = '❌ Network error resolving course';
+    info.style.color = 'var(--red)';
+  }
+}
+
+async function saveManualCourse() {
+  const url = document.getElementById('courseUrl').value.trim();
+  const scheduleId = document.getElementById('manualScheduleId').value.trim();
+  const bookingClass = document.getElementById('manualBookingClass').value.trim();
+  const name = document.getElementById('manualCourseName').value.trim();
+  if (!scheduleId || !name) { toast('Schedule ID and name are required', 'error'); return; }
+
+  // Extract course_id from URL
+  const match = url.match(/booking\/(\d+)/);
+  if (!match) { toast('Could not extract course ID from URL', 'error'); return; }
+  const courseId = match[1];
+
+  const res = await fetch(`/api/courses/${courseId}`, {
+    method: 'PUT', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ schedule_id: scheduleId, booking_class: bookingClass || scheduleId, name, url })
+  });
+  const data = await res.json();
+  if (data.success) {
+    resolvedCourse = data.course;
+    const info = document.getElementById('courseInfo');
+    info.textContent = `✅ ${name} saved · Schedule: ${scheduleId} · Class: ${bookingClass}`;
+    info.style.color = 'var(--green)';
+    document.getElementById('manualOverride').style.display = 'none';
+    loadSavedCourses();
+    toast('Course saved! ⛳', 'success');
+  }
+}
+
+async function deleteCourse(courseId) {
+  if (!confirm('Remove this saved course?')) return;
+  await fetch(`/api/courses/${courseId}`, { method: 'DELETE' });
+  document.getElementById(`course-${courseId}`)?.remove();
+  loadSavedCourses();
+  toast('Course removed', '');
+}
+
 
 // ── Add job ────────────────────────────────────────────────────────────────
 async function addJob() {

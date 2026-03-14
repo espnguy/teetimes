@@ -21,11 +21,18 @@ HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/122.0.0.0 Safari/537.36"
+        "Chrome/143.0.0.0 Safari/537.36"
     ),
-    "X-Requested-With": "XMLHttpRequest",
-    "Accept": "application/json, text/javascript, */*; q=0.01",
-    "Referer": "https://foreupsoftware.com/",
+    "Accept":            "application/json, text/javascript, */*; q=0.01",
+    "Accept-Language":   "en-US,en;q=0.9",
+    "X-Requested-With":  "XMLHttpRequest",
+    "X-Fu-Golfer-Location": "foreup",
+    "Api-Key":           "no_limits",
+    "Origin":            "https://foreupsoftware.com",
+    "Referer":           "https://foreupsoftware.com/index.php/booking/19536",
+    "Sec-Fetch-Dest":    "empty",
+    "Sec-Fetch-Mode":    "cors",
+    "Sec-Fetch-Site":    "same-origin",
 }
 
 
@@ -103,12 +110,18 @@ class ForeUpClient:
 
     def login(self):
         url = f"{BASE}/index.php/api/booking/users/login"
+        # Send as form-encoded with Content-Type matching what the browser sends
         payload = {
             "email": self.email,
             "password": self.password,
             "api_key": "no_limits",
         }
-        resp = self.session.post(url, json=payload, timeout=15)
+        resp = self.session.post(
+            url,
+            data=payload,
+            headers={"Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"},
+            timeout=15,
+        )
         _check_response(resp, "Login")
         data = resp.json()
         # Accept any of the known ID fields
@@ -150,7 +163,6 @@ class ForeUpClient:
             "schedule_id": schedule_id,
             "schedule_ids[]": schedule_id,
             "specials_only": "0",
-            "api_key": "no_limits",
         }
 
         resp = self.session.get(url, params=params, timeout=15)
@@ -198,7 +210,6 @@ class ForeUpClient:
             "carts": 0,
             "booking_class": booking_class or course_id,
             "schedule_id": schedule_id,
-            "api_key": "no_limits",
         }
 
         resp = self.session.post(url, json=payload, timeout=20)

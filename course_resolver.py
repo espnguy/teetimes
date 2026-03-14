@@ -11,14 +11,12 @@ Resolved courses are saved to courses.json so users only set up each course once
 """
 
 import re
-import json
-import os
 import logging
 import requests
+import db
 
 logger = logging.getLogger(__name__)
 
-COURSES_FILE = os.environ.get("COURSES_FILE", "courses.json")
 BASE = "https://foreupsoftware.com"
 
 HEADERS = {
@@ -31,36 +29,16 @@ HEADERS = {
 }
 
 
-# ── Course library ─────────────────────────────────────────────────────────────
+# ── Course library — delegates to db.py ───────────────────────────────────────
 
 def load_courses() -> dict:
-    """Load saved courses. Returns {course_id: {name, schedule_id, booking_class, url}}"""
-    if not os.path.exists(COURSES_FILE):
-        return {}
-    try:
-        with open(COURSES_FILE) as f:
-            return json.load(f)
-    except Exception:
-        return {}
-
+    return db.load_courses()
 
 def save_course(course_id: str, info: dict):
-    """Save a resolved course to the library."""
-    courses = load_courses()
-    courses[course_id] = info
-    try:
-        with open(COURSES_FILE, "w") as f:
-            json.dump(courses, f, indent=2)
-        logger.info(f"Saved course {course_id}: {info.get('name', '?')}")
-    except Exception as e:
-        logger.error(f"Could not save course: {e}")
-
+    db.save_course(course_id, info)
 
 def delete_course(course_id: str):
-    courses = load_courses()
-    courses.pop(course_id, None)
-    with open(COURSES_FILE, "w") as f:
-        json.dump(courses, f, indent=2)
+    db.delete_course(course_id)
 
 
 # ── Auto-detection ─────────────────────────────────────────────────────────────
@@ -88,7 +66,7 @@ def resolve_course_from_url(url: str) -> dict:
         raise ValueError(str(e))
 
     # Step 2 — check saved courses
-    courses = load_courses()
+    courses = db.load_courses()
     if course_id in courses:
         saved = courses[course_id]
         logger.info(f"Using saved course {course_id}: {saved.get('name')}")

@@ -7,15 +7,16 @@ import os
 import logging
 from flask import Flask, render_template, jsonify, request, redirect, url_for
 from foreup_client import ForeUpClient, parse_course_url
-from course_resolver import resolve_course_from_url, load_courses, save_course, delete_course
+from course_resolver import resolve_course_from_url
 from scheduler import TeeTimeScheduler
 from notifier import notify_test
-from config import load_config, save_config, credentials_from_env
+import db
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
+db.init_db()
 scheduler = TeeTimeScheduler()
 scheduler.start()
 logger.info("Scheduler started at module load")
@@ -25,14 +26,14 @@ logger.info("Scheduler started at module load")
 
 @app.route("/")
 def index():
-    cfg = load_config()
+    cfg = db.load_config()
     jobs = scheduler.get_all_jobs()
-    courses = load_courses()
+    courses = db.load_courses()
     return render_template("index.html",
                            config=cfg,
                            jobs=jobs,
                            courses=courses,
-                           env_creds=credentials_from_env())
+                           env_creds=db.credentials_from_env())
 
 
 @app.route("/config", methods=["POST"])
@@ -40,7 +41,7 @@ def update_config():
     data = request.form.to_dict()
     if not data.get("password"):
         data.pop("password", None)
-    save_config(data)
+    db.save_config(data)
     return redirect(url_for("index"))
 
 
@@ -62,7 +63,7 @@ def resolve_course():
 
 @app.route("/api/courses")
 def get_courses():
-    return jsonify(load_courses())
+    return jsonify(db.load_courses())
 
 
 @app.route("/api/courses/<course_id>", methods=["PUT"])
@@ -80,13 +81,13 @@ def update_course(course_id):
         "name": data["name"],
         "url": data.get("url", f"https://foreupsoftware.com/index.php/booking/{course_id}"),
     }
-    save_course(course_id, info)
+    db.save_course(course_id, info)
     return jsonify({"success": True, "course": info})
 
 
 @app.route("/api/courses/<course_id>", methods=["DELETE"])
 def remove_course(course_id):
-    delete_course(course_id)
+    db.delete_course(course_id)
     return jsonify({"success": True})
 
 
@@ -129,7 +130,7 @@ def get_available_times(job_id):
     job = scheduler.get_job(job_id)
     if not job:
         return jsonify({"error": "Job not found"}), 404
-    cfg = load_config()
+    cfg = db.load_config()
     try:
         client = ForeUpClient(cfg.get("email"), cfg.get("password"))
         times = client.fetch_tee_times(
@@ -157,7 +158,7 @@ def book_tee_time():
     job = scheduler.get_job(job_id)
     if not job:
         return jsonify({"error": "Job not found"}), 404
-    cfg = load_config()
+    cfg = db.load_config()
     try:
         client = ForeUpClient(cfg.get("email"), cfg.get("password"))
         result = client.book_tee_time(

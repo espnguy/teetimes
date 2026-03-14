@@ -169,9 +169,32 @@
             <input name="poll_interval" type="number" value="{{ config.poll_interval }}" min="30" max="600">
           </div>
         </div>
-        <div style="display:flex;gap:10px;align-items:center">
+        <div class="divider"></div>
+        <h3 style="font-size:.9rem;font-weight:700;color:var(--green);margin-bottom:12px">📲 Pushover Notifications</h3>
+        <div style="font-size:.8rem;color:var(--gray);margin-bottom:12px">
+          Get an instant phone notification when tee times are found.
+          Sign up free at <a href="https://pushover.net" target="_blank" style="color:var(--green)">pushover.net</a>
+          (app is $5 one-time), then create an app token at
+          <a href="https://pushover.net/apps/build" target="_blank" style="color:var(--green)">pushover.net/apps/build</a>.
+        </div>
+        <div class="form-row-2">
+          <div class="form-row">
+            <label>Pushover User Key</label>
+            <input name="pushover_user_token" type="text" value="{{ config.pushover_user_token }}" placeholder="uXXXXXXXXXXXXXXXXXXXX">
+          </div>
+          <div class="form-row">
+            <label>Pushover App Token</label>
+            <input name="pushover_app_token" type="text" value="{{ config.pushover_app_token }}" placeholder="aXXXXXXXXXXXXXXXXXXXX">
+          </div>
+        </div>
+        <div class="form-row">
+          <label>Your Dashboard URL <span style="font-weight:400;color:var(--gray)">(included in notifications so you can tap to open)</span></label>
+          <input name="dashboard_url" type="url" value="{{ config.dashboard_url }}" placeholder="https://your-app.railway.app">
+        </div>
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
           <button type="submit" class="btn btn-primary">💾 Save Settings</button>
           <button type="button" class="btn btn-outline" onclick="testLogin()">🔑 Test Login</button>
+          <button type="button" class="btn btn-outline" onclick="testPushover()">📲 Test Notification</button>
           <span id="loginStatus" style="font-size:.85rem"></span>
         </div>
       </form>
@@ -298,7 +321,32 @@ function toggleSettings() {
   document.getElementById('settingsSection').classList.toggle('open');
 }
 
-// ── Test login ─────────────────────────────────────────────────────────────
+async function testPushover() {
+  const el = document.getElementById('loginStatus');
+  el.textContent = '⏳ Sending test notification...';
+  el.style.color = 'var(--gray)';
+  const userToken = document.querySelector('input[name=pushover_user_token]').value;
+  const appToken  = document.querySelector('input[name=pushover_app_token]').value;
+  if (!userToken || !appToken) {
+    el.textContent = '⚠️ Enter both Pushover keys first';
+    el.style.color = 'var(--yellow)';
+    return;
+  }
+  try {
+    const res = await fetch('/api/test_pushover', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ pushover_user_token: userToken, pushover_app_token: appToken })
+    });
+    const data = await res.json();
+    el.textContent = data.success ? '📲 Check your phone!' : '❌ ' + data.message;
+    el.style.color = data.success ? 'var(--green)' : 'var(--red)';
+  } catch(e) {
+    el.textContent = '❌ Network error';
+    el.style.color = 'var(--red)';
+  }
+}
+
+
 async function testLogin() {
   const el = document.getElementById('loginStatus');
   el.textContent = '⏳ Testing...';

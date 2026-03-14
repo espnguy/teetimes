@@ -11,7 +11,10 @@ DEFAULTS = {
     "default_players": "2",
     "default_holes": "18",
     "poll_interval": "120",
-    "notify_email": "",  # optional: send email when times found
+    "notify_email": "",
+    "pushover_user_token": "",
+    "pushover_app_token": "",
+    "dashboard_url": "",     # e.g. https://your-app.railway.app
 }
 
 

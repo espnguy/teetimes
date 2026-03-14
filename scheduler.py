@@ -22,6 +22,7 @@ from datetime import datetime
 from copy import deepcopy
 from foreup_client import ForeUpClient, parse_course_url
 from config import load_config
+from notifier import notify_times_available
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +71,7 @@ class TeeTimeScheduler:
             "booked_confirmation": None,
             "created_at": datetime.now().isoformat(),
             "last_polled": None,
+            "notification_sent": False,
             "logs": [],
         }
         with self._lock:
@@ -158,16 +160,36 @@ class TeeTimeScheduler:
                     self._jobs[job_id]["available_times"] = times
 
             if times:
+                already_notified = False
                 with self._lock:
                     if job_id in self._jobs:
                         self._jobs[job_id]["status"] = "available"
+                        already_notified = self._jobs[job_id].get("notification_sent", False)
                 self._log(job_id, f"🟢 [{now_str}] {len(times)} time(s) available! "
                                   f"First: {times[0].get('time')} — waiting for your confirmation.")
+
+                # Send Pushover notification only once per availability window
+                if not already_notified:
+                    sent = notify_times_available(
+                        user_token=cfg.get("pushover_user_token", ""),
+                        app_token=cfg.get("pushover_app_token", ""),
+                        job=job,
+                        times=times,
+                        dashboard_url=cfg.get("dashboard_url", ""),
+                    )
+                    with self._lock:
+                        if job_id in self._jobs:
+                            self._jobs[job_id]["notification_sent"] = sent
+                    if sent:
+                        self._log(job_id, "📲 Pushover notification sent!")
+                    else:
+                        self._log(job_id, "⚠️  Pushover not configured — open the dashboard manually.")
             else:
                 with self._lock:
                     if job_id in self._jobs and self._jobs[job_id]["status"] == "available":
-                        # Times disappeared (someone else grabbed them) — go back to polling
+                        # Times disappeared — reset so we notify again if they return
                         self._jobs[job_id]["status"] = "polling"
+                        self._jobs[job_id]["notification_sent"] = False
                 self._log(job_id, f"⏳ [{now_str}] No times in window yet.")
 
         except PermissionError as e:

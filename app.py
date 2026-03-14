@@ -10,8 +10,9 @@ import threading
 import logging
 from datetime import datetime, timedelta
 from flask import Flask, render_template, jsonify, request, redirect, url_for
-from foreup_client import ForeUpClient
+from foreup_client import ForeUpClient, parse_course_url
 from scheduler import TeeTimeScheduler
+from notifier import notify_test
 from config import load_config, save_config
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -113,6 +114,19 @@ def book_tee_time():
     except Exception as e:
         logger.error(f"Booking error for job {job_id}: {e}")
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/test_pushover", methods=["POST"])
+def test_pushover():
+    """Send a test Pushover notification."""
+    data = request.json
+    success = notify_test(
+        user_token=data.get("pushover_user_token", ""),
+        app_token=data.get("pushover_app_token", ""),
+    )
+    if success:
+        return jsonify({"success": True, "message": "Notification sent! Check your phone."})
+    return jsonify({"success": False, "message": "Failed — check your Pushover tokens."}), 400
 
 
 @app.route("/api/test_login", methods=["POST"])

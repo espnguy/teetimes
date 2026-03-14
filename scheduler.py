@@ -109,7 +109,7 @@ class TeeTimeScheduler:
         try:
             client = ForeUpClient(email, password)
             times = client.fetch_tee_times(
-                course_id=job["course_id"],
+                course_id=job["course_id"],  # also used for session init
                 schedule_id=job["schedule_id"],
                 date=job["target_date"],
                 time_from=job["time_from"],

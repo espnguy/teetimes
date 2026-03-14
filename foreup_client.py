@@ -108,9 +108,24 @@ class ForeUpClient:
 
     # ── Auth ──────────────────────────────────────────────────────────────────
 
-    def login(self):
+    def _init_session(self, course_id: str = "19536"):
+        """
+        Visit the booking page first to obtain a PHPSESSID cookie.
+        ForeUp returns 'Refresh required' if no session cookie is present.
+        """
+        booking_url = f"{BASE}/index.php/booking/{course_id}"
+        try:
+            self.session.get(booking_url, timeout=15)
+            logger.info(f"Session initialized from {booking_url}")
+        except Exception as e:
+            logger.warning(f"Could not init session: {e}")
+
+    def login(self, course_id: str = "19536"):
+        # Step 1 — get a session cookie by visiting the booking page
+        self._init_session(course_id)
+
+        # Step 2 — log in with that session active
         url = f"{BASE}/index.php/api/booking/users/login"
-        # Send as form-encoded with Content-Type matching what the browser sends
         payload = {
             "email": self.email,
             "password": self.password,
@@ -134,9 +149,9 @@ class ForeUpClient:
         logger.info(f"Logged in as {self.email} (id={user_id})")
         return data
 
-    def _ensure_logged_in(self):
+    def _ensure_logged_in(self, course_id: str = "19536"):
         if not self._logged_in:
-            self.login()
+            self.login(course_id)
 
     # ── Tee Time Availability ─────────────────────────────────────────────────
 
@@ -151,7 +166,7 @@ class ForeUpClient:
         holes: int = 18,
         booking_class: str = "",
     ) -> list[dict]:
-        self._ensure_logged_in()
+        self._ensure_logged_in(course_id)
 
         url = f"{BASE}/index.php/api/booking/times"
         params = {
@@ -200,7 +215,7 @@ class ForeUpClient:
         players: int = 2,
         booking_class: str = "",
     ) -> dict:
-        self._ensure_logged_in()
+        self._ensure_logged_in(course_id)
 
         url = f"{BASE}/index.php/api/booking/pending_reservation"
 

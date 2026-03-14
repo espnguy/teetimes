@@ -651,7 +651,31 @@ async function addJob() {
   const [y, m, d] = targetDate.split('-');
   const fmtDate = `${m}-${d}-${y}`;
 
-  btn.disabled = true; btn.textContent = '⏳ Adding...';
+  btn.disabled = true; btn.textContent = '⏳ Resolving course...';
+
+  // If course wasn't auto-resolved yet, try now
+  if (!resolvedCourse) {
+    try {
+      const rRes = await fetch('/api/resolve_course', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ url: courseUrl })
+      });
+      const rData = await rRes.json();
+      if (rData.error) {
+        toast('Could not resolve course: ' + rData.error, 'error');
+        btn.disabled = false; btn.textContent = '➕ Start Watching';
+        document.getElementById('manualOverride').style.display = 'block';
+        return;
+      }
+      resolvedCourse = rData;
+    } catch(e) {
+      toast('Network error resolving course: ' + e.message, 'error');
+      btn.disabled = false; btn.textContent = '➕ Start Watching';
+      return;
+    }
+  }
+
+  btn.textContent = '⏳ Adding...';
   try {
     const res = await fetch('/api/add_job', {
       method: 'POST', headers: {'Content-Type':'application/json'},
@@ -659,11 +683,17 @@ async function addJob() {
                              time_from: timeFrom, time_to: timeTo, players, holes })
     });
     const data = await res.json();
-    if (data.error) { toast(data.error, 'error'); return; }
+    if (data.error) {
+      toast('Error: ' + data.error, 'error');
+      return;
+    }
     toast('Watch started! 🎉', 'success');
+    resolvedCourse = null;
     document.getElementById('courseUrl').value = '';
     document.getElementById('courseInfo').textContent = '';
+    document.getElementById('savedCourseSelect').value = '';
     refreshJobs();
+    loadSavedCourses();
   } catch(e) {
     toast('Failed to add job: ' + e.message, 'error');
   } finally {

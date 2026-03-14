@@ -121,7 +121,7 @@ class ForeUpClient:
             resp = self.session.get(booking_url, timeout=15)
             # Try to extract booking_class_id from the page HTML
             import re
-            m = re.search(r'booking_class_id["\s:=]+["']?(\d+)', resp.text)
+            m = re.search(r"booking_class_id[\"\s:=]+[\"']?(\d+)", resp.text)
             if m:
                 self._booking_class_id = m.group(1)
             logger.info(f"Session initialized from {booking_url} (booking_class_id={self._booking_class_id})")

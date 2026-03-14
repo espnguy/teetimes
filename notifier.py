@@ -90,12 +90,21 @@ def notify_times_available(
     if count > 3:
         preview_str += f"\n  …and {count - 3} more"
 
-    title   = f"⛳ {count} Tee Time{'s' if count > 1 else ''} Available!"
-    message = (
-        f"{date}  {time_from}–{time_to}  ({players} players)\n\n"
-        f"{preview_str}\n\n"
-        f"Open the dashboard to confirm and book."
-    )
+    # If only one time passed, it's a booking confirmation
+    if count == 1:
+        title   = f"✅ Tee Time Booked!"
+        message = (
+            f"{date}  ({players} players)\n\n"
+            f"{preview_str}\n\n"
+            f"Your tee time has been reserved."
+        )
+    else:
+        title   = f"⛳ {count} Tee Time{'s' if count > 1 else ''} Available — Action Required!"
+        message = (
+            f"{date}  {time_from}–{time_to}  ({players} players)\n\n"
+            f"{preview_str}\n\n"
+            f"Auto-booking failed. Open dashboard to confirm manually."
+        )
 
     return send_pushover(
         user_token=user_token,

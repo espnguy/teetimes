@@ -240,15 +240,32 @@ class ForeUpClient:
 
         url = f"{BASE}/index.php/api/booking/pending_reservation"
 
+        # Payload confirmed via DevTools — sent as form-encoded, not JSON
         payload = {
-            **time_data,
-            "players": players,
-            "carts": 0,
-            "booking_class": booking_class or course_id,
-            "schedule_id": schedule_id,
+            "time":                     time_data.get("time"),
+            "holes":                    time_data.get("holes", 18),
+            "players":                  players,
+            "carts":                    "true",
+            "schedule_id":              time_data.get("schedule_id", schedule_id),
+            "teesheet_side_id":         time_data.get("teesheet_side_id", ""),
+            "course_id":                time_data.get("course_id", course_id),
+            "booking_class_id":         time_data.get("booking_class_id", booking_class or schedule_id),
+            "duration":                 1,
+            "foreup_discount":          "false",
+            "foreup_trade_discount_rate": time_data.get("foreup_trade_discount_rate", 0),
+            "trade_min_players":        time_data.get("trade_min_players", 0),
+            "cart_fee":                 time_data.get("cart_fee", 0),
+            "cart_fee_tax":             time_data.get("cart_fee_tax", 0),
+            "green_fee":                time_data.get("green_fee", 0),
+            "green_fee_tax":            time_data.get("green_fee_tax", 0),
         }
 
-        resp = self.session.post(url, json=payload, timeout=20)
+        resp = self.session.post(
+            url,
+            data=payload,
+            headers={"Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"},
+            timeout=20,
+        )
         _check_response(resp, "Book tee time")
 
         result = resp.json()

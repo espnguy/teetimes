@@ -105,6 +105,8 @@ class ForeUpClient:
         self.session.headers.update(HEADERS)
         self._logged_in = False
         self._customer_id = None
+        self._course_id = "19536"
+        self._booking_class_id = ""
 
     # ── Auth ──────────────────────────────────────────────────────────────────
 
@@ -113,10 +115,16 @@ class ForeUpClient:
         Visit the booking page first to obtain a PHPSESSID cookie.
         ForeUp returns 'Refresh required' if no session cookie is present.
         """
+        self._course_id = course_id
         booking_url = f"{BASE}/index.php/booking/{course_id}"
         try:
-            self.session.get(booking_url, timeout=15)
-            logger.info(f"Session initialized from {booking_url}")
+            resp = self.session.get(booking_url, timeout=15)
+            # Try to extract booking_class_id from the page HTML
+            import re
+            m = re.search(r'booking_class_id["\s:=]+["']?(\d+)', resp.text)
+            if m:
+                self._booking_class_id = m.group(1)
+            logger.info(f"Session initialized from {booking_url} (booking_class_id={self._booking_class_id})")
         except Exception as e:
             logger.warning(f"Could not init session: {e}")
 
@@ -127,9 +135,11 @@ class ForeUpClient:
         # Step 2 — log in with that session active
         url = f"{BASE}/index.php/api/booking/users/login"
         payload = {
-            "email": self.email,
-            "password": self.password,
-            "api_key": "no_limits",
+            "username":        self.email,
+            "password":        self.password,
+            "api_key":         "no_limits",
+            "booking_class_id": self._booking_class_id,
+            "course_id":       self._course_id,
         }
         resp = self.session.post(
             url,

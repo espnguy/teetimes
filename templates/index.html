@@ -1,0 +1,591 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>⛳ Tee Time Booker</title>
+<style>
+  :root {
+    --green: #2d6a4f;
+    --green-light: #40916c;
+    --green-pale: #d8f3dc;
+    --yellow: #f4a261;
+    --red: #e63946;
+    --gray: #6b7280;
+    --bg: #f0f4f0;
+    --card: #ffffff;
+    --border: #d1d5db;
+    --text: #1f2937;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+         background: var(--bg); color: var(--text); min-height: 100vh; }
+
+  /* ── Header ── */
+  header { background: var(--green); color: white; padding: 16px 24px;
+           display: flex; align-items: center; gap: 12px; box-shadow: 0 2px 8px rgba(0,0,0,.2); }
+  header h1 { font-size: 1.4rem; font-weight: 700; }
+  header span { font-size: 1.6rem; }
+  .header-sub { font-size: .8rem; opacity: .8; margin-left: auto; }
+
+  /* ── Layout ── */
+  .container { max-width: 960px; margin: 0 auto; padding: 24px 16px; }
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  @media (max-width: 640px) { .grid-2 { grid-template-columns: 1fr; } }
+
+  /* ── Cards ── */
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px;
+          padding: 20px; box-shadow: 0 1px 4px rgba(0,0,0,.06); }
+  .card h2 { font-size: 1rem; font-weight: 700; color: var(--green); margin-bottom: 16px;
+             display: flex; align-items: center; gap: 8px; }
+
+  /* ── Forms ── */
+  label { display: block; font-size: .85rem; font-weight: 600; color: var(--gray); margin-bottom: 4px; }
+  input, select { width: 100%; padding: 9px 12px; border: 1px solid var(--border);
+                  border-radius: 8px; font-size: .9rem; background: #fafafa;
+                  transition: border .15s; }
+  input:focus, select:focus { outline: none; border-color: var(--green-light);
+                               box-shadow: 0 0 0 3px rgba(64,145,108,.15); }
+  .form-row { margin-bottom: 14px; }
+  .form-row-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 14px; }
+
+  /* ── Buttons ── */
+  .btn { padding: 9px 18px; border: none; border-radius: 8px; font-size: .9rem;
+         font-weight: 600; cursor: pointer; transition: all .15s; display: inline-flex;
+         align-items: center; gap: 6px; }
+  .btn-primary { background: var(--green); color: white; }
+  .btn-primary:hover { background: var(--green-light); }
+  .btn-danger  { background: var(--red); color: white; }
+  .btn-danger:hover  { opacity: .85; }
+  .btn-confirm { background: #22c55e; color: white; font-size: 1rem; padding: 12px 28px; }
+  .btn-confirm:hover { background: #16a34a; }
+  .btn-sm { padding: 5px 12px; font-size: .8rem; }
+  .btn-outline { background: transparent; border: 1px solid var(--border); color: var(--text); }
+  .btn-outline:hover { background: var(--bg); }
+  .btn:disabled { opacity: .5; cursor: not-allowed; }
+
+  /* ── Status badges ── */
+  .badge { display: inline-flex; align-items: center; gap: 4px; padding: 3px 10px;
+           border-radius: 20px; font-size: .78rem; font-weight: 700; }
+  .badge-polling   { background: #dbeafe; color: #1d4ed8; }
+  .badge-available { background: #dcfce7; color: #15803d; animation: pulse 1.5s infinite; }
+  .badge-booked    { background: var(--green-pale); color: var(--green); }
+  .badge-error     { background: #fee2e2; color: var(--red); }
+  .badge-paused    { background: #f3f4f6; color: var(--gray); }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.6} }
+
+  /* ── Job list ── */
+  .job-card { border: 1px solid var(--border); border-radius: 10px; padding: 16px;
+              margin-bottom: 12px; background: #fafffe; }
+  .job-card.available { border-color: #22c55e; background: #f0fff4; }
+  .job-card.booked    { border-color: var(--green); background: var(--green-pale); }
+  .job-card.error     { border-color: var(--red); background: #fff5f5; }
+  .job-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+  .job-title  { font-weight: 700; font-size: .95rem; }
+  .job-meta   { font-size: .8rem; color: var(--gray); margin-top: 4px; }
+  .job-actions { display: flex; gap: 6px; flex-shrink: 0; }
+
+  /* ── Log viewer ── */
+  .log-box { background: #111; color: #9effa0; font-family: monospace; font-size: .78rem;
+             border-radius: 8px; padding: 12px; max-height: 180px; overflow-y: auto;
+             display: none; margin-top: 10px; }
+  .log-box.open { display: block; }
+
+  /* ── Modal ── */
+  .modal-backdrop { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.5);
+                    z-index: 1000; align-items: center; justify-content: center; }
+  .modal-backdrop.open { display: flex; }
+  .modal { background: white; border-radius: 16px; padding: 28px; max-width: 520px; width: 90%;
+           box-shadow: 0 20px 60px rgba(0,0,0,.3); }
+  .modal h3 { font-size: 1.2rem; margin-bottom: 18px; color: var(--green); }
+  .time-slot { border: 2px solid var(--border); border-radius: 10px; padding: 14px 16px;
+               margin-bottom: 10px; cursor: pointer; transition: all .15s; }
+  .time-slot:hover, .time-slot.selected { border-color: var(--green); background: var(--green-pale); }
+  .time-slot-time { font-size: 1.3rem; font-weight: 800; color: var(--green); }
+  .time-slot-meta { font-size: .83rem; color: var(--gray); margin-top: 4px; }
+  .modal-actions { display: flex; gap: 10px; margin-top: 20px; justify-content: flex-end; }
+
+  /* ── Settings ── */
+  .settings-toggle { font-size: .85rem; color: var(--green); cursor: pointer;
+                     text-decoration: underline; margin-bottom: 16px; display: inline-block; }
+  .settings-section { display: none; }
+  .settings-section.open { display: block; }
+
+  /* ── Toast ── */
+  #toast { position: fixed; bottom: 24px; right: 24px; background: #1f2937; color: white;
+           padding: 12px 20px; border-radius: 10px; font-size: .9rem; font-weight: 600;
+           transform: translateY(80px); opacity: 0; transition: all .3s; z-index: 9999; }
+  #toast.show { transform: translateY(0); opacity: 1; }
+  #toast.success { background: var(--green); }
+  #toast.error   { background: var(--red); }
+
+  .divider { height: 1px; background: var(--border); margin: 20px 0; }
+  .empty-state { text-align: center; color: var(--gray); padding: 40px 20px; font-size: .9rem; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+  .dot-green { background: #22c55e; }
+  .dot-blue  { background: #60a5fa; }
+  .dot-gray  { background: var(--gray); }
+  .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid #ccc;
+             border-top-color: var(--green); border-radius: 50%; animation: spin .6s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+
+<header>
+  <span>⛳</span>
+  <h1>Tee Time Booker</h1>
+  <div class="header-sub" id="clock"></div>
+</header>
+
+<div class="container">
+
+  <!-- Settings -->
+  <div class="card" style="margin-bottom:20px">
+    <span class="settings-toggle" onclick="toggleSettings()">⚙️ Settings (credentials & defaults)</span>
+    <div class="settings-section" id="settingsSection">
+      <form action="/config" method="POST">
+        <div class="form-row-2">
+          <div class="form-row">
+            <label>ForeUp Email</label>
+            <input name="email" type="email" value="{{ config.email }}" placeholder="you@email.com" required>
+          </div>
+          <div class="form-row">
+            <label>ForeUp Password</label>
+            <input name="password" type="password" value="{{ config.password }}" placeholder="••••••••" required>
+          </div>
+        </div>
+        <div class="form-row-2">
+          <div class="form-row">
+            <label>Default Players</label>
+            <select name="default_players">
+              {% for n in [1,2,3,4] %}
+              <option value="{{n}}" {% if config.default_players == n|string %}selected{% endif %}>{{n}}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="form-row">
+            <label>Poll Interval (seconds)</label>
+            <input name="poll_interval" type="number" value="{{ config.poll_interval }}" min="30" max="600">
+          </div>
+        </div>
+        <div style="display:flex;gap:10px;align-items:center">
+          <button type="submit" class="btn btn-primary">💾 Save Settings</button>
+          <button type="button" class="btn btn-outline" onclick="testLogin()">🔑 Test Login</button>
+          <span id="loginStatus" style="font-size:.85rem"></span>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div class="grid-2">
+
+    <!-- Add Job Form -->
+    <div class="card">
+      <h2>📅 Add Tee Time Watch</h2>
+      <div class="form-row">
+        <label>ForeUp Course URL</label>
+        <input id="courseUrl" type="url" placeholder="https://foreupsoftware.com/index.php/booking/19536"
+               oninput="clearCourseInfo()">
+        <div id="courseInfo" style="font-size:.78rem;color:var(--green);margin-top:4px"></div>
+      </div>
+      <div class="form-row">
+        <label>Target Date</label>
+        <input id="targetDate" type="date">
+      </div>
+      <div class="form-row-2">
+        <div>
+          <label>Earliest Time</label>
+          <input id="timeFrom" type="time" value="07:00">
+        </div>
+        <div>
+          <label>Latest Time</label>
+          <input id="timeTo" type="time" value="10:00">
+        </div>
+      </div>
+      <div class="form-row-2">
+        <div>
+          <label>Players</label>
+          <select id="players">
+            <option value="1">1</option>
+            <option value="2" selected>2</option>
+            <option value="3">3</option>
+            <option value="4">4</option>
+          </select>
+        </div>
+        <div>
+          <label>Holes</label>
+          <select id="holes">
+            <option value="18" selected>18 holes</option>
+            <option value="9">9 holes</option>
+          </select>
+        </div>
+      </div>
+      <button class="btn btn-primary" onclick="addJob()" id="addBtn">
+        ➕ Start Watching
+      </button>
+    </div>
+
+    <!-- How it works -->
+    <div class="card">
+      <h2>ℹ️ How it works</h2>
+      <ol style="padding-left:18px;line-height:2;font-size:.9rem;color:var(--gray)">
+        <li>Enter your <strong>ForeUp course URL</strong> from the booking page</li>
+        <li>Set your <strong>target date and preferred time window</strong></li>
+        <li>Click <strong>"Start Watching"</strong> — the server polls every 2 min</li>
+        <li>When a tee time appears, the job turns <span style="color:#15803d;font-weight:700">green</span></li>
+        <li>Click <strong>"View & Confirm"</strong> to see options and book</li>
+      </ol>
+      <div class="divider"></div>
+      <div style="font-size:.82rem;color:var(--gray)">
+        <strong>Tip:</strong> ForeUp releases tee times exactly 7 days in advance at midnight.
+        Start a job the day before to be ready the moment they drop!
+      </div>
+    </div>
+  </div>
+
+  <!-- Jobs List -->
+  <div class="card" style="margin-top:20px">
+    <h2>🔍 Active Watches</h2>
+    <div id="jobsList">
+      {% if jobs %}
+        {% for job in jobs %}
+        {{ render_job(job) }}
+        {% endfor %}
+      {% else %}
+        <div class="empty-state">No watches yet. Add one above!</div>
+      {% endif %}
+    </div>
+  </div>
+
+</div>
+
+<!-- Confirmation Modal -->
+<div class="modal-backdrop" id="confirmModal">
+  <div class="modal">
+    <h3>🏌️ Confirm Tee Time</h3>
+    <p id="modalDate" style="color:var(--gray);font-size:.88rem;margin-bottom:16px"></p>
+    <div id="modalSlots"></div>
+    <div id="modalLoading" style="text-align:center;padding:20px;display:none">
+      <div class="spinner" style="width:28px;height:28px;margin:auto"></div>
+      <p style="margin-top:10px;color:var(--gray)">Booking...</p>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-confirm" onclick="confirmBook()" id="confirmBtn" disabled>
+        ✅ Book Selected Time
+      </button>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+// ── State ──────────────────────────────────────────────────────────────────
+let activeJobId = null;
+let selectedTime = null;
+let refreshTimer = null;
+
+// ── Clock ──────────────────────────────────────────────────────────────────
+function updateClock() {
+  document.getElementById('clock').textContent = new Date().toLocaleTimeString();
+}
+setInterval(updateClock, 1000); updateClock();
+
+// ── Settings toggle ────────────────────────────────────────────────────────
+function toggleSettings() {
+  document.getElementById('settingsSection').classList.toggle('open');
+}
+
+// ── Test login ─────────────────────────────────────────────────────────────
+async function testLogin() {
+  const el = document.getElementById('loginStatus');
+  el.textContent = '⏳ Testing...';
+  const email = document.querySelector('input[name=email]').value;
+  const password = document.querySelector('input[name=password]').value;
+  try {
+    const res = await fetch('/api/test_login', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ email, password })
+    });
+    const data = await res.json();
+    el.textContent = data.success ? '✅ ' + data.message : '❌ ' + data.message;
+    el.style.color = data.success ? 'var(--green)' : 'var(--red)';
+  } catch(e) {
+    el.textContent = '❌ Network error';
+  }
+}
+
+// ── Course URL resolve ─────────────────────────────────────────────────────
+let resolveTimeout;
+function clearCourseInfo() {
+  document.getElementById('courseInfo').textContent = '';
+  clearTimeout(resolveTimeout);
+  resolveTimeout = setTimeout(resolveCourse, 600);
+}
+async function resolveCourse() {
+  const url = document.getElementById('courseUrl').value.trim();
+  if (!url) return;
+  try {
+    const res = await fetch('/api/resolve_course', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ url })
+    });
+    const data = await res.json();
+    if (data.error) {
+      document.getElementById('courseInfo').textContent = '⚠️ ' + data.error;
+      document.getElementById('courseInfo').style.color = 'var(--red)';
+    } else {
+      document.getElementById('courseInfo').textContent =
+        `✅ Course ID: ${data.course_id}  |  Schedule ID: ${data.schedule_id}`;
+      document.getElementById('courseInfo').style.color = 'var(--green)';
+    }
+  } catch(e) {}
+}
+
+// ── Add job ────────────────────────────────────────────────────────────────
+async function addJob() {
+  const btn = document.getElementById('addBtn');
+  const courseUrl  = document.getElementById('courseUrl').value.trim();
+  const targetDate = document.getElementById('targetDate').value;
+  const timeFrom   = document.getElementById('timeFrom').value;
+  const timeTo     = document.getElementById('timeTo').value;
+  const players    = document.getElementById('players').value;
+  const holes      = document.getElementById('holes').value;
+
+  if (!courseUrl || !targetDate || !timeFrom || !timeTo) {
+    toast('Please fill in all required fields', 'error'); return;
+  }
+
+  // Convert date from YYYY-MM-DD to MM-DD-YYYY
+  const [y, m, d] = targetDate.split('-');
+  const fmtDate = `${m}-${d}-${y}`;
+
+  btn.disabled = true; btn.textContent = '⏳ Adding...';
+  try {
+    const res = await fetch('/api/add_job', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ course_url: courseUrl, target_date: fmtDate,
+                             time_from: timeFrom, time_to: timeTo, players, holes })
+    });
+    const data = await res.json();
+    if (data.error) { toast(data.error, 'error'); return; }
+    toast('Watch started! 🎉', 'success');
+    document.getElementById('courseUrl').value = '';
+    document.getElementById('courseInfo').textContent = '';
+    refreshJobs();
+  } catch(e) {
+    toast('Failed to add job: ' + e.message, 'error');
+  } finally {
+    btn.disabled = false; btn.textContent = '➕ Start Watching';
+  }
+}
+
+// ── Refresh jobs ───────────────────────────────────────────────────────────
+async function refreshJobs() {
+  try {
+    const res = await fetch('/api/jobs');
+    const jobs = await res.json();
+    const el = document.getElementById('jobsList');
+    if (jobs.length === 0) {
+      el.innerHTML = '<div class="empty-state">No watches yet. Add one above!</div>';
+      return;
+    }
+    el.innerHTML = jobs.map(renderJob).join('');
+  } catch(e) { console.error(e); }
+}
+
+// Auto-refresh every 30 seconds
+setInterval(refreshJobs, 30000);
+
+function renderJob(job) {
+  const badge = statusBadge(job.status);
+  const lastPoll = job.last_polled
+    ? new Date(job.last_polled).toLocaleTimeString()
+    : 'never';
+  const availableCount = (job.available_times || []).length;
+
+  return `
+  <div class="job-card ${job.status}" id="job-${job.id}">
+    <div class="job-header">
+      <div>
+        <div class="job-title">
+          📅 ${job.target_date} &nbsp;⏰ ${job.time_from}–${job.time_to}
+          &nbsp; ${badge}
+        </div>
+        <div class="job-meta">
+          ${job.players} players · ${job.holes || 18} holes
+          · Last polled: ${lastPoll}
+          ${availableCount > 0 ? `· <strong style="color:#15803d">${availableCount} time(s) found!</strong>` : ''}
+        </div>
+        <div class="job-meta" style="word-break:break-all;margin-top:2px;font-size:.75rem">
+          ${job.course_url}
+        </div>
+        ${job.booked_confirmation ? `
+          <div style="margin-top:8px;background:var(--green-pale);border-radius:8px;
+                      padding:8px 12px;font-size:.82rem;color:var(--green);font-weight:600">
+            ✅ Booked! Confirmation: ${JSON.stringify(job.booked_confirmation).substring(0,120)}
+          </div>` : ''}
+      </div>
+      <div class="job-actions">
+        ${job.status === 'available' ? `
+          <button class="btn btn-confirm btn-sm" onclick="openConfirm('${job.id}')">
+            🏌️ View & Confirm
+          </button>` : ''}
+        <button class="btn btn-outline btn-sm" onclick="toggleLog('${job.id}')">Logs</button>
+        <button class="btn btn-danger btn-sm" onclick="removeJob('${job.id}')">✕</button>
+      </div>
+    </div>
+    <div class="log-box" id="log-${job.id}">
+      ${(job.logs || []).slice(-20).reverse().map(l => `<div>${escHtml(l)}</div>`).join('') || 'No logs yet.'}
+    </div>
+  </div>`;
+}
+
+function statusBadge(status) {
+  const map = {
+    polling:   ['badge-polling',   '⏳ Polling'],
+    available: ['badge-available', '🟢 AVAILABLE'],
+    booked:    ['badge-booked',    '✅ Booked'],
+    error:     ['badge-error',     '❌ Error'],
+    paused:    ['badge-paused',    '⏸ Paused'],
+  };
+  const [cls, label] = map[status] || ['badge-paused', status];
+  return `<span class="badge ${cls}">${label}</span>`;
+}
+
+function toggleLog(jobId) {
+  document.getElementById(`log-${jobId}`).classList.toggle('open');
+}
+
+async function removeJob(jobId) {
+  if (!confirm('Remove this watch?')) return;
+  await fetch(`/api/remove_job/${jobId}`, { method: 'DELETE' });
+  refreshJobs();
+}
+
+// ── Confirmation modal ─────────────────────────────────────────────────────
+async function openConfirm(jobId) {
+  activeJobId = jobId;
+  selectedTime = null;
+  document.getElementById('confirmBtn').disabled = true;
+  document.getElementById('modalSlots').innerHTML =
+    '<div style="text-align:center;padding:20px"><div class="spinner" style="width:28px;height:28px;margin:auto"></div></div>';
+  document.getElementById('confirmModal').classList.add('open');
+
+  try {
+    const res = await fetch(`/api/available_times/${jobId}`);
+    const data = await res.json();
+
+    if (data.error) {
+      document.getElementById('modalSlots').innerHTML =
+        `<p style="color:var(--red)">Error: ${escHtml(data.error)}</p>`;
+      return;
+    }
+
+    const times = data.times || [];
+    if (times.length === 0) {
+      document.getElementById('modalSlots').innerHTML =
+        '<p style="color:var(--gray)">No times found in your window. They may have just been taken.</p>';
+      return;
+    }
+
+    // Get date label from first job
+    const res2 = await fetch('/api/jobs');
+    const jobs = await res2.json();
+    const job = jobs.find(j => j.id === jobId);
+    if (job) document.getElementById('modalDate').textContent =
+      `${job.target_date} · ${job.players} players · ${job.holes || 18} holes`;
+
+    document.getElementById('modalSlots').innerHTML = times.map((t, i) => `
+      <div class="time-slot" id="slot-${i}" onclick="selectSlot(${i}, this)" data-time='${JSON.stringify(t)}'>
+        <div class="time-slot-time">${formatSlotTime(t.time)}</div>
+        <div class="time-slot-meta">
+          ${t.available_spots || '?'} spots available
+          ${t.green_fee !== undefined ? ` · $${t.green_fee} green fee` : ''}
+          ${t.holes ? ` · ${t.holes} holes` : ''}
+        </div>
+      </div>`).join('');
+  } catch(e) {
+    document.getElementById('modalSlots').innerHTML =
+      `<p style="color:var(--red)">Error loading times: ${e.message}</p>`;
+  }
+}
+
+function selectSlot(index, el) {
+  document.querySelectorAll('.time-slot').forEach(s => s.classList.remove('selected'));
+  el.classList.add('selected');
+  selectedTime = JSON.parse(el.dataset.time);
+  document.getElementById('confirmBtn').disabled = false;
+}
+
+function closeModal() {
+  document.getElementById('confirmModal').classList.remove('open');
+  activeJobId = null; selectedTime = null;
+}
+
+async function confirmBook() {
+  if (!activeJobId || !selectedTime) return;
+
+  const btn = document.getElementById('confirmBtn');
+  btn.disabled = true;
+  document.getElementById('modalLoading').style.display = 'block';
+
+  try {
+    const res = await fetch('/api/book', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ job_id: activeJobId, time_data: selectedTime })
+    });
+    const data = await res.json();
+    if (data.error) {
+      toast('Booking failed: ' + data.error, 'error');
+      btn.disabled = false;
+    } else {
+      toast('🎉 Tee time booked!', 'success');
+      closeModal();
+      refreshJobs();
+    }
+  } catch(e) {
+    toast('Network error: ' + e.message, 'error');
+    btn.disabled = false;
+  } finally {
+    document.getElementById('modalLoading').style.display = 'none';
+  }
+}
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+function formatSlotTime(t) {
+  if (!t) return 'Unknown';
+  // Unix epoch
+  if (/^\d{10,}$/.test(String(t))) {
+    return new Date(parseInt(t) * 1000).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+  }
+  // HH:MM:SS → 12h
+  const m = String(t).match(/^(\d{1,2}):(\d{2})/);
+  if (m) {
+    let h = parseInt(m[1]), min = m[2];
+    const ampm = h >= 12 ? 'PM' : 'AM';
+    h = h % 12 || 12;
+    return `${h}:${min} ${ampm}`;
+  }
+  return String(t);
+}
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function toast(msg, type='') {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.className = 'show ' + type;
+  setTimeout(() => { el.className = ''; }, 3500);
+}
+
+// ── Init ───────────────────────────────────────────────────────────────────
+// Set min date to today
+document.getElementById('targetDate').min = new Date().toISOString().split('T')[0];
+</script>
+</body>
+</html>

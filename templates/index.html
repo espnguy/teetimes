@@ -144,15 +144,32 @@
   <div class="card" style="margin-bottom:20px">
     <span class="settings-toggle" onclick="toggleSettings()">⚙️ Settings (credentials & defaults)</span>
     <div class="settings-section" id="settingsSection">
+      {% if env_creds %}
+      <div style="background:#dcfce7;border:1px solid #86efac;border-radius:8px;padding:10px 14px;
+                  margin-bottom:16px;font-size:.85rem;color:#15803d;display:flex;align-items:center;gap:8px">
+        🔒 <strong>Credentials loaded from Railway environment variables</strong> — they persist through restarts and redeploys.
+        To change them, update <code>FOREUP_EMAIL</code> and <code>FOREUP_PASSWORD</code> in your Railway dashboard.
+      </div>
+      {% endif %}
       <form action="/config" method="POST">
         <div class="form-row-2">
           <div class="form-row">
             <label>ForeUp Email</label>
-            <input name="email" type="email" value="{{ config.email }}" placeholder="you@email.com" required>
+            <input name="email" type="email"
+              value="{{ config.email }}"
+              placeholder="you@email.com"
+              {% if env_creds %}style="background:#f0fdf4;color:#166534" title="Set via FOREUP_EMAIL env var"{% endif %}>
           </div>
           <div class="form-row">
             <label>ForeUp Password</label>
-            <input name="password" type="password" value="{{ config.password }}" placeholder="••••••••" required>
+            <input name="password" type="password"
+              value=""
+              placeholder="{% if env_creds %}Saved via env var — leave blank to keep{% else %}••••••••{% endif %}"
+              {% if env_creds %}style="background:#f0fdf4" title="Set via FOREUP_PASSWORD env var"{% endif %}>
+            <div style="font-size:.75rem;color:var(--gray);margin-top:3px">
+              {% if env_creds %}Password is set. Leave blank to keep current value.
+              {% else %}Enter to save. Will persist via Railway env vars.{% endif %}
+            </div>
           </div>
         </div>
         <div class="form-row-2">

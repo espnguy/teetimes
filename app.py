@@ -11,7 +11,7 @@ from flask import Flask, render_template, jsonify, request, redirect, url_for
 from foreup_client import ForeUpClient, parse_course_url
 from scheduler import TeeTimeScheduler
 from notifier import notify_test
-from config import load_config, save_config
+from config import load_config, save_config, credentials_from_env
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -26,12 +26,15 @@ scheduler = TeeTimeScheduler()
 def index():
     cfg = load_config()
     jobs = scheduler.get_all_jobs()
-    return render_template("index.html", config=cfg, jobs=jobs)
+    return render_template("index.html", config=cfg, jobs=jobs, env_creds=credentials_from_env())
 
 
 @app.route("/config", methods=["POST"])
 def update_config():
     data = request.form.to_dict()
+    # Don't overwrite existing password if field was left blank
+    if not data.get("password"):
+        data.pop("password", None)
     save_config(data)
     return redirect(url_for("index"))
 

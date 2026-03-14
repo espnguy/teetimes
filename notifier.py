@@ -81,28 +81,36 @@ def notify_times_available(
     course_id = job.get("course_id", "")
     count     = len(times)
 
-    # Format preview of available times
+    # Format preview of available times — show all of them
     previews = []
-    for t in times[:4]:
+    for t in times:
         raw = t.get("time", "")
         fee = t.get("green_fee")
         spots = t.get("available_spots", "")
-        fee_str = f" ${fee}" if fee is not None else ""
-        spots_str = f" ({spots} spots)" if spots else ""
-        previews.append(f"• {_fmt_time(raw)}{fee_str}{spots_str}")
+        fee_str = f"  ${fee:.2f}" if fee is not None else ""
+        spots_str = f"  {spots} open" if spots else ""
+        previews.append(f"{_fmt_time(raw)}{fee_str}{spots_str}")
     preview_str = "\n".join(previews)
-    if count > 4:
-        preview_str += f"\n…and {count - 4} more"
 
-    title = f"⛳ {count} Tee Time{'s' if count > 1 else ''} Available — Tap to Book!"
+    # Format date nicely e.g. "Thu Mar 20"
+    try:
+        from datetime import datetime as dt
+        d = dt.strptime(date, "%m-%d-%Y")
+        pretty_date = d.strftime("%a %b %-d")
+    except Exception:
+        pretty_date = date
+
+    title = f"⛳ {count} Tee Time{'s' if count > 1 else ''} — {pretty_date}"
     message = (
-        f"{date}  {time_from}–{time_to}  ({players} players)\n\n"
-        f"{preview_str}\n\n"
-        f"Tap below to open ForeUp and book now."
+        f"{pretty_date} • {players} players\n"
+        f"──────────────\n"
+        f"{preview_str}\n"
+        f"──────────────\n"
+        f"ForeUp → select Public → {pretty_date}"
     )
 
-    # Direct link to the ForeUp booking page for this date
-    booking_url = ForeUpClient.booking_url(course_id, date, int(players))
+    # Link goes straight to the booking page
+    booking_url = f"https://foreupsoftware.com/index.php/booking/{course_id}#/teetimes"
 
     return send_pushover(
         user_token=user_token,
@@ -110,7 +118,7 @@ def notify_times_available(
         title=title,
         message=message,
         url=booking_url,
-        url_title="📅 Book on ForeUp →",
+        url_title="Open ForeUp →",
         priority=1,
     )
 

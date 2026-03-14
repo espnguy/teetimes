@@ -72,47 +72,45 @@ def notify_times_available(
     times: list,
     dashboard_url: str = "",
 ) -> bool:
-    """Send a formatted tee time alert for a specific job."""
+    """Send a tee time alert with a direct link to the ForeUp booking page."""
+    from foreup_client import ForeUpClient
     date      = job.get("target_date", "?")
     time_from = job.get("time_from", "?")
     time_to   = job.get("time_to", "?")
     players   = job.get("players", "?")
+    course_id = job.get("course_id", "")
     count     = len(times)
 
-    # Format a preview of the first few available times
+    # Format preview of available times
     previews = []
-    for t in times[:3]:
+    for t in times[:4]:
         raw = t.get("time", "")
         fee = t.get("green_fee")
-        fee_str = f" · ${fee}" if fee is not None else ""
-        previews.append(f"  • {_fmt_time(raw)}{fee_str}")
+        spots = t.get("available_spots", "")
+        fee_str = f" ${fee}" if fee is not None else ""
+        spots_str = f" ({spots} spots)" if spots else ""
+        previews.append(f"• {_fmt_time(raw)}{fee_str}{spots_str}")
     preview_str = "\n".join(previews)
-    if count > 3:
-        preview_str += f"\n  …and {count - 3} more"
+    if count > 4:
+        preview_str += f"\n…and {count - 4} more"
 
-    # If only one time passed, it's a booking confirmation
-    if count == 1:
-        title   = f"✅ Tee Time Booked!"
-        message = (
-            f"{date}  ({players} players)\n\n"
-            f"{preview_str}\n\n"
-            f"Your tee time has been reserved."
-        )
-    else:
-        title   = f"⛳ {count} Tee Time{'s' if count > 1 else ''} Available — Action Required!"
-        message = (
-            f"{date}  {time_from}–{time_to}  ({players} players)\n\n"
-            f"{preview_str}\n\n"
-            f"Auto-booking failed. Open dashboard to confirm manually."
-        )
+    title = f"⛳ {count} Tee Time{'s' if count > 1 else ''} Available — Tap to Book!"
+    message = (
+        f"{date}  {time_from}–{time_to}  ({players} players)\n\n"
+        f"{preview_str}\n\n"
+        f"Tap below to open ForeUp and book now."
+    )
+
+    # Direct link to the ForeUp booking page for this date
+    booking_url = ForeUpClient.booking_url(course_id, date, int(players))
 
     return send_pushover(
         user_token=user_token,
         app_token=app_token,
         title=title,
         message=message,
-        url=dashboard_url or "",
-        url_title="Confirm & Book →",
+        url=booking_url,
+        url_title="📅 Book on ForeUp →",
         priority=1,
     )
 

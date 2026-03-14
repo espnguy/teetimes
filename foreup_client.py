@@ -228,98 +228,16 @@ class ForeUpClient:
 
     # ── Booking ───────────────────────────────────────────────────────────────
 
-    def book_tee_time(
-        self,
-        course_id: str,
-        schedule_id: str,
-        time_data: dict,
-        players: int = 2,
-        booking_class: str = "",
-    ) -> dict:
-        self._ensure_logged_in(course_id)
-
-        url = f"{BASE}/index.php/api/booking/pending_reservation"
-
-        # Payload confirmed via DevTools — sent as form-encoded, not JSON
-        payload = {
-            "time":                     time_data.get("time"),
-            "holes":                    time_data.get("holes", 18),
-            "players":                  players,
-            "carts":                    "true",
-            "schedule_id":              time_data.get("schedule_id", schedule_id),
-            "teesheet_side_id":         time_data.get("teesheet_side_id", ""),
-            "course_id":                time_data.get("course_id", course_id),
-            "booking_class_id":         booking_class or time_data.get("booking_class_id", schedule_id),
-            "duration":                 1,
-            "foreup_discount":          "false",
-            "foreup_trade_discount_rate": time_data.get("foreup_trade_discount_rate", 0),
-            "trade_min_players":        time_data.get("trade_min_players", 0),
-            "cart_fee":                 time_data.get("cart_fee", 0),
-            "cart_fee_tax":             time_data.get("cart_fee_tax", 0),
-            "green_fee":                time_data.get("green_fee", 0),
-            "green_fee_tax":            time_data.get("green_fee_tax", 0),
-        }
-
-        resp = self.session.post(
-            url,
-            data=payload,
-            headers={"Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"},
-            timeout=20,
+    @staticmethod
+    def booking_url(course_id: str, date: str, players: int = 2) -> str:
+        """
+        Build a direct ForeUp booking URL for a specific date.
+        date format: MM-DD-YYYY
+        """
+        return (
+            f"{BASE}/index.php/booking/{course_id}"
+            f"?date={date}&players={players}#/teetimes"
         )
-        _check_response(resp, "Book tee time")
-
-        result = resp.json()
-        logger.info(f"Booking result: {result}")
-
-        # Step 2 — POST to /users/reservations (validate, then commit)
-        reservation_id = result.get("reservation_id")
-        if reservation_id:
-            reservations_url = f"{BASE}/index.php/api/booking/users/reservations"
-
-            # Build the full reservation body matching what the browser sends
-            res_body = {
-                **time_data,                          # full slot object
-                "players":                str(players),
-                "carts":                  True,
-                "holes":                  str(time_data.get("holes", 18)),
-                "promo_code":             "",
-                "promo_discount":         0,
-                "player_list":            False,
-                "duration":               1,
-                "notes":                  [],
-                "customer_message":       "",
-                "pending_reservation_id": reservation_id,
-                "booking_class_id":       booking_class or time_data.get("booking_class_id", schedule_id),
-                "captchaid":              "0",        # try without captcha first
-            }
-
-            # Pass 1 — validate only
-            try:
-                validate_body = {**res_body, "validate_only": True}
-                v_resp = self.session.post(reservations_url, json=validate_body, timeout=20)
-                if v_resp.ok:
-                    v_result = v_resp.json()
-                    logger.info(f"Validate result: {v_result}")
-                else:
-                    logger.warning(f"Validate returned {v_resp.status_code}: {v_resp.text[:200]}")
-            except Exception as e:
-                logger.warning(f"Validate step error: {e}")
-
-            # Pass 2 — commit (validate_only omitted / false)
-            try:
-                commit_body = {**res_body, "validate_only": False}
-                c_resp = self.session.post(reservations_url, json=commit_body, timeout=20)
-                if c_resp.ok:
-                    c_result = c_resp.json()
-                    logger.info(f"Commit result: {c_result}")
-                    result["commit_result"] = c_result
-                else:
-                    logger.warning(f"Commit returned {c_resp.status_code}: {c_resp.text[:300]}")
-                    result["commit_error"] = c_resp.text[:300]
-            except Exception as e:
-                logger.warning(f"Commit step error: {e}")
-
-        return result
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

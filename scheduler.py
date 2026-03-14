@@ -126,52 +126,28 @@ class TeeTimeScheduler:
             })
 
             if times:
-                # Sort by time and pick the earliest
-                earliest = sorted(times, key=lambda t: t.get("time", ""))[0]
+                already_notified = job.get("notification_sent", False)
+                db.update_job_fields(job_id, {
+                    "status": "available",
+                    "available_times": times,
+                })
                 self._log(job_id,
                     f"🟢 [{now_str}] {len(times)} time(s) available! "
-                    f"Earliest: {earliest.get('time')} — auto-booking now..."
+                    f"Earliest: {times[0].get('time')}"
                 )
-                # Auto-book the earliest time
-                try:
-                    result = client.book_tee_time(
-                        course_id=job["course_id"],
-                        schedule_id=job["schedule_id"],
-                        time_data=earliest,
-                        players=job["players"],
-                        booking_class=job.get("booking_class", ""),
-                    )
-                    db.update_job_fields(job_id, {
-                        "status": "booked",
-                        "booked_confirmation": result,
-                        "available_times": times,
-                    })
-                    self._log(job_id, f"✅ BOOKED! {earliest.get('time')} for {job['players']} players. Confirmation: {str(result)[:200]}")
-                    # Send notification that booking was made
-                    notify_times_available(
+                if not already_notified:
+                    sent = notify_times_available(
                         user_token=cfg.get("pushover_user_token", ""),
                         app_token=cfg.get("pushover_app_token", ""),
                         job=job,
-                        times=[earliest],
+                        times=times,
                         dashboard_url=cfg.get("dashboard_url", ""),
                     )
-                    self._log(job_id, "📲 Booking confirmation notification sent!")
-                except Exception as book_err:
-                    # Booking failed — fall back to notify-and-confirm flow
-                    self._log(job_id, f"⚠️ Auto-book failed ({book_err}) — notifying you to confirm manually.")
-                    db.update_job_fields(job_id, {"status": "available", "available_times": times})
-                    already_notified = job.get("notification_sent", False)
-                    if not already_notified:
-                        sent = notify_times_available(
-                            user_token=cfg.get("pushover_user_token", ""),
-                            app_token=cfg.get("pushover_app_token", ""),
-                            job=job,
-                            times=times,
-                            dashboard_url=cfg.get("dashboard_url", ""),
-                        )
-                        db.update_job_fields(job_id, {"notification_sent": sent})
-                        if sent:
-                            self._log(job_id, "📲 Pushover notification sent — please confirm manually.")
+                    db.update_job_fields(job_id, {"notification_sent": sent})
+                    if sent:
+                        self._log(job_id, "📲 Pushover notification sent with booking link!")
+                    else:
+                        self._log(job_id, "⚠️ Pushover not configured.")
             else:
                 if job["status"] == "available":
                     db.update_job_fields(job_id, {

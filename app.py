@@ -148,33 +148,6 @@ def get_available_times(job_id):
         return jsonify({"error": str(e)}), 500
 
 
-@app.route("/api/book", methods=["POST"])
-def book_tee_time():
-    data = request.json
-    job_id = data.get("job_id")
-    time_data = data.get("time_data")
-    if not job_id or not time_data:
-        return jsonify({"error": "Missing job_id or time_data"}), 400
-    job = scheduler.get_job(job_id)
-    if not job:
-        return jsonify({"error": "Job not found"}), 404
-    cfg = db.load_config()
-    try:
-        client = ForeUpClient(cfg.get("email"), cfg.get("password"))
-        result = client.book_tee_time(
-            course_id=job["course_id"],
-            schedule_id=job["schedule_id"],
-            time_data=time_data,
-            players=int(job["players"]),
-            booking_class=job.get("booking_class", ""),
-        )
-        scheduler.mark_job_booked(job_id, result)
-        return jsonify({"success": True, "confirmation": result})
-    except Exception as e:
-        logger.exception(f"book_tee_time failed for job {job_id}")
-        return jsonify({"error": str(e)}), 500
-
-
 @app.route("/api/test_pushover", methods=["POST"])
 def test_pushover():
     data = request.json

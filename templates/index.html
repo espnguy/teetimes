@@ -487,34 +487,6 @@ async function testLogin() {
   }
 }
 
-// ── Course URL resolve ─────────────────────────────────────────────────────
-let resolveTimeout;
-function clearCourseInfo() {
-  document.getElementById('courseInfo').textContent = '';
-  clearTimeout(resolveTimeout);
-  resolveTimeout = setTimeout(resolveCourse, 600);
-}
-async function resolveCourse() {
-  const url = document.getElementById('courseUrl').value.trim();
-  if (!url) return;
-  try {
-    const res = await fetch('/api/resolve_course', {
-      method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ url })
-    });
-    const data = await res.json();
-    if (data.error) {
-      document.getElementById('courseInfo').textContent = '⚠️ ' + data.error;
-      document.getElementById('courseInfo').style.color = 'var(--red)';
-    } else {
-      document.getElementById('courseInfo').textContent =
-        `✅ Course ID: ${data.course_id}  |  Schedule ID: ${data.schedule_id}`;
-      document.getElementById('courseInfo').style.color = 'var(--green)';
-    }
-  } catch(e) {}
-}
-
-
 // ── Course management ──────────────────────────────────────────────────────
 let resolvedCourse = null;
 let resolveTimeout = null;

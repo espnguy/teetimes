@@ -149,14 +149,18 @@ class ForeUpClient:
         )
         _check_response(resp, "Login")
         data = resp.json()
-        # Accept any of the known ID fields
-        user_id = (data.get("player_id") or data.get("customer_id")
-                   or data.get("id") or data.get("token"))
-        if not user_id:
+        # ForeUp returns person_id/user_id and logged_in:True on success
+        user_id = (data.get("person_id") or data.get("user_id") or
+                   data.get("player_id") or data.get("customer_id") or
+                   data.get("id") or data.get("jwt"))
+        if not user_id and not data.get("logged_in"):
             raise ValueError(f"Login failed – unexpected ForeUp response: {data}")
         self._logged_in = True
         self._customer_id = user_id
-        logger.info(f"Logged in as {self.email} (id={user_id})")
+        # Also store JWT for future requests if present
+        if data.get("jwt"):
+            self.session.headers["Authorization"] = f"Bearer {data['jwt']}"
+        logger.info(f"Logged in as {self.email} (person_id={data.get('person_id')})")
         return data
 
     def _ensure_logged_in(self, course_id: str = "19536"):

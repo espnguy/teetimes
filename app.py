@@ -4,9 +4,7 @@ Flask web dashboard + background poller
 """
 
 import os
-import json
 import logging
-from datetime import datetime
 from flask import Flask, render_template, jsonify, request, redirect, url_for
 from foreup_client import ForeUpClient, parse_course_url
 from scheduler import TeeTimeScheduler
@@ -18,6 +16,12 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 scheduler = TeeTimeScheduler()
+
+# Start the polling thread immediately when the module is imported.
+# This works for both `python app.py` and gunicorn (which imports this module).
+# The scheduler is thread-safe and start() is idempotent.
+scheduler.start()
+logger.info("Scheduler started at module load")
 
 
 # ─── Web Routes ───────────────────────────────────────────────────────────────
@@ -32,7 +36,6 @@ def index():
 @app.route("/config", methods=["POST"])
 def update_config():
     data = request.form.to_dict()
-    # Don't overwrite existing password if field was left blank
     if not data.get("password"):
         data.pop("password", None)
     save_config(data)
@@ -157,7 +160,19 @@ def get_job_logs(job_id):
     return jsonify(scheduler.get_job_logs(job_id))
 
 
-# ─── Error handlers — return JSON instead of HTML 500 pages ──────────────────
+@app.route("/api/scheduler_status")
+def scheduler_status():
+    """Quick health check — confirms the polling thread is alive."""
+    alive = scheduler._thread is not None and scheduler._thread.is_alive()
+    jobs = scheduler.get_all_jobs()
+    return jsonify({
+        "scheduler_running": alive,
+        "job_count": len(jobs),
+        "jobs": [{"id": j["id"], "status": j["status"], "last_polled": j.get("last_polled")} for j in jobs]
+    })
+
+
+# ─── Error handlers ───────────────────────────────────────────────────────────
 
 @app.errorhandler(404)
 def not_found(e):
@@ -170,7 +185,6 @@ def server_error(e):
 
 
 if __name__ == "__main__":
-    scheduler.start()
     port = int(os.environ.get("PORT", 5000))
     debug = os.environ.get("FLASK_DEBUG", "false").lower() == "true"
     app.run(host="0.0.0.0", port=port, debug=debug)

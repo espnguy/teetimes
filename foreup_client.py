@@ -201,21 +201,28 @@ class ForeUpClient:
         if not isinstance(all_times, list):
             raise ValueError(f"Unexpected tee times response: {all_times}")
 
+        # Log first slot so we can see the raw time format
+        if all_times:
+            logger.info(f"First slot sample: {all_times[0]}")
+
         # Filter by time window
         from_minutes = _time_to_minutes(time_from)
         to_minutes = _time_to_minutes(time_to)
 
         filtered = []
         for slot in all_times:
-            slot_minutes = _parse_slot_time(str(slot.get("time", "")))
+            raw_time = str(slot.get("time", ""))
+            slot_minutes = _parse_slot_time(raw_time)
             if slot_minutes is None:
+                logger.debug(f"Could not parse slot time: {raw_time!r}")
                 continue
             if from_minutes <= slot_minutes <= to_minutes:
                 filtered.append(slot)
 
         logger.info(
             f"Fetched {len(all_times)} times for schedule {schedule_id} on {date}, "
-            f"{len(filtered)} in window {time_from}–{time_to}"
+            f"{len(filtered)} in window {time_from}–{time_to} "
+            f"(from={from_minutes}min, to={to_minutes}min)"
         )
         return filtered
 

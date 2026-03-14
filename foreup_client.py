@@ -275,16 +275,25 @@ def _time_to_minutes(t: str) -> int:
 def _parse_slot_time(slot_time: str):
     """
     Parse ForeUp time field into minutes since midnight.
-    Handles: 'HH:MM:SS', 'H:MMam', unix epoch int/str
+    Handles:
+      'YYYY-MM-DD HH:MM'  ← confirmed live format e.g. '2026-03-20 15:20'
+      'HH:MM' or 'HH:MM:SS'
+      unix epoch int/str
     """
     if not slot_time:
         return None
     slot_time = str(slot_time).strip()
 
+    # 'YYYY-MM-DD HH:MM' — extract the time portion after the space
+    if " " in slot_time:
+        slot_time = slot_time.split(" ")[1]
+
+    # HH:MM or HH:MM:SS
     m = re.match(r"^(\d{1,2}):(\d{2})", slot_time)
     if m:
         return int(m.group(1)) * 60 + int(m.group(2))
 
+    # Unix epoch
     if re.match(r"^\d{10,}$", slot_time):
         try:
             dt = datetime.fromtimestamp(int(slot_time))

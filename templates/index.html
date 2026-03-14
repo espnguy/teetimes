@@ -273,7 +273,48 @@
     <div id="jobsList">
       {% if jobs %}
         {% for job in jobs %}
-        {{ render_job(job) }}
+        <div class="job-card {{ job.status }}" id="job-{{ job.id }}">
+          <div class="job-header">
+            <div>
+              <div class="job-title">
+                📅 {{ job.target_date }} &nbsp;⏰ {{ job.time_from }}–{{ job.time_to }}
+                &nbsp;
+                {% if job.status == 'polling' %}<span class="badge badge-polling">⏳ Polling</span>
+                {% elif job.status == 'available' %}<span class="badge badge-available">🟢 AVAILABLE</span>
+                {% elif job.status == 'booked' %}<span class="badge badge-booked">✅ Booked</span>
+                {% elif job.status == 'error' %}<span class="badge badge-error">❌ Error</span>
+                {% else %}<span class="badge badge-paused">⏸ Paused</span>{% endif %}
+              </div>
+              <div class="job-meta">
+                {{ job.players }} players · {{ job.holes or 18 }} holes
+                · Last polled: {{ job.last_polled or 'never' }}
+                {% if job.available_times %}· <strong style="color:#15803d">{{ job.available_times|length }} time(s) found!</strong>{% endif %}
+              </div>
+              <div class="job-meta" style="word-break:break-all;margin-top:2px;font-size:.75rem">
+                {{ job.course_url }}
+              </div>
+              {% if job.booked_confirmation %}
+              <div style="margin-top:8px;background:var(--green-pale);border-radius:8px;padding:8px 12px;font-size:.82rem;color:var(--green);font-weight:600">
+                ✅ Booked!
+              </div>
+              {% endif %}
+            </div>
+            <div class="job-actions">
+              {% if job.status == 'available' %}
+              <button class="btn btn-confirm btn-sm" onclick="openConfirm('{{ job.id }}')">🏌️ View & Confirm</button>
+              {% endif %}
+              <button class="btn btn-outline btn-sm" onclick="toggleLog('{{ job.id }}')">Logs</button>
+              <button class="btn btn-danger btn-sm" onclick="removeJob('{{ job.id }}')">✕</button>
+            </div>
+          </div>
+          <div class="log-box" id="log-{{ job.id }}">
+            {% for entry in job.logs[-20:]|reverse %}
+            <div>{{ entry }}</div>
+            {% else %}
+            No logs yet.
+            {% endfor %}
+          </div>
+        </div>
         {% endfor %}
       {% else %}
         <div class="empty-state">No watches yet. Add one above!</div>

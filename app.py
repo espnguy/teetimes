@@ -5,10 +5,8 @@ Flask web dashboard + background poller
 
 import os
 import json
-import time
-import threading
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from flask import Flask, render_template, jsonify, request, redirect, url_for
 from foreup_client import ForeUpClient, parse_course_url
 from scheduler import TeeTimeScheduler
@@ -42,14 +40,17 @@ def update_config():
 
 @app.route("/api/add_job", methods=["POST"])
 def add_job():
-    """Add a new polling job."""
     data = request.json
     required = ["course_url", "target_date", "time_from", "time_to", "players"]
     for field in required:
         if not data.get(field):
             return jsonify({"error": f"Missing field: {field}"}), 400
-    job_id = scheduler.add_job(data)
-    return jsonify({"success": True, "job_id": job_id})
+    try:
+        job_id = scheduler.add_job(data)
+        return jsonify({"success": True, "job_id": job_id})
+    except Exception as e:
+        logger.exception("add_job failed")
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/remove_job/<job_id>", methods=["DELETE"])
@@ -65,7 +66,6 @@ def get_jobs():
 
 @app.route("/api/available_times/<job_id>")
 def get_available_times(job_id):
-    """Fetch current available tee times for a job (for confirmation UI)."""
     job = scheduler.get_job(job_id)
     if not job:
         return jsonify({"error": "Job not found"}), 404
@@ -82,13 +82,12 @@ def get_available_times(job_id):
         )
         return jsonify({"times": times})
     except Exception as e:
-        logger.error(f"Error fetching times for job {job_id}: {e}")
+        logger.exception(f"get_available_times failed for job {job_id}")
         return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/book", methods=["POST"])
 def book_tee_time():
-    """Manually confirm and book a specific tee time."""
     data = request.json
     job_id = data.get("job_id")
     time_data = data.get("time_data")
@@ -112,13 +111,12 @@ def book_tee_time():
         scheduler.mark_job_booked(job_id, result)
         return jsonify({"success": True, "confirmation": result})
     except Exception as e:
-        logger.error(f"Booking error for job {job_id}: {e}")
+        logger.exception(f"book_tee_time failed for job {job_id}")
         return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/test_pushover", methods=["POST"])
 def test_pushover():
-    """Send a test Pushover notification."""
     data = request.json
     success = notify_test(
         user_token=data.get("pushover_user_token", ""),
@@ -131,7 +129,6 @@ def test_pushover():
 
 @app.route("/api/test_login", methods=["POST"])
 def test_login():
-    """Verify credentials work."""
     data = request.json
     try:
         client = ForeUpClient(data.get("email"), data.get("password"))
@@ -143,11 +140,9 @@ def test_login():
 
 @app.route("/api/resolve_course", methods=["POST"])
 def resolve_course():
-    """Extract course_id and schedule_id from a ForeUp booking URL."""
     data = request.json
     url = data.get("url", "")
     try:
-        from foreup_client import parse_course_url
         info = parse_course_url(url)
         return jsonify(info)
     except Exception as e:
@@ -159,7 +154,20 @@ def get_job_logs(job_id):
     return jsonify(scheduler.get_job_logs(job_id))
 
 
+# ─── Error handlers — return JSON instead of HTML 500 pages ──────────────────
+
+@app.errorhandler(404)
+def not_found(e):
+    return jsonify({"error": "Not found"}), 404
+
+@app.errorhandler(500)
+def server_error(e):
+    logger.exception("Unhandled 500 error")
+    return jsonify({"error": "Internal server error", "detail": str(e)}), 500
+
+
 if __name__ == "__main__":
     scheduler.start()
     port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, debug=False)
+    debug = os.environ.get("FLASK_DEBUG", "false").lower() == "true"
+    app.run(host="0.0.0.0", port=port, debug=debug)

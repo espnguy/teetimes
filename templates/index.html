@@ -233,8 +233,8 @@
       </div>
 
       <div class="form-row">
-        <label>ForeUp Course URL</label>
-        <input id="courseUrl" type="url" placeholder="https://foreupsoftware.com/index.php/booking/19536"
+        <label>Booking URL <span style="font-weight:400;color:var(--gray)">(ForeUp or GolfNow/TeeItUp)</span></label>
+        <input id="courseUrl" type="url" placeholder="https://foreupsoftware.com/index.php/booking/19536  or  https://course.book.teeitup.golf"
                oninput="onCourseUrlChange()">
         <div id="courseInfo" style="font-size:.78rem;margin-top:4px"></div>
       </div>
@@ -243,7 +243,7 @@
       <div id="manualOverride" style="display:none;background:#fffbeb;border:1px solid #fcd34d;
            border-radius:8px;padding:12px;margin-bottom:14px">
         <div style="font-size:.82rem;font-weight:600;color:#92400e;margin-bottom:8px">
-          ⚠️ Could not auto-detect IDs. Enter them manually from the DevTools URL:
+          ⚠️ Could not auto-detect IDs. For ForeUp: check DevTools → Network. For GolfNow/TeeItUp: look for facilityId in the URL.
         </div>
         <div class="form-row-2">
           <div>
@@ -303,7 +303,7 @@
     <div class="card">
       <h2>ℹ️ How it works</h2>
       <ol style="padding-left:18px;line-height:2;font-size:.9rem;color:var(--gray)">
-        <li>Enter your <strong>ForeUp course URL</strong> from the booking page</li>
+        <li>Enter your <strong>booking URL</strong> — ForeUp or GolfNow/TeeItUp</li>
         <li>Set your <strong>target date and preferred time window</strong></li>
         <li>Click <strong>"Start Watching"</strong> — the server polls every 2 min</li>
         <li>When a tee time appears, the job turns <span style="color:#15803d;font-weight:700">green</span></li>

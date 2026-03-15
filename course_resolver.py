@@ -52,8 +52,8 @@ def detect_platform(url: str) -> str:
         return "golfnow"
     if "foreupsoftware.com" in url_lower or "foreup" in url_lower:
         return "foreup"
-    # Default — try foreup
-    return "foreup"
+    # Could be a course website — fetch page and check for embedded platforms
+    return "unknown"
 
 
 def resolve_course_from_url(url: str) -> dict:
@@ -72,6 +72,19 @@ def resolve_course_from_url(url: str) -> dict:
 
     if platform in ("teeitup", "golfnow"):
         return _resolve_golfnow(clean_url, platform)
+
+    # Unknown — fetch the page and look for embedded booking platform links
+    if platform == "unknown":
+        detected = _detect_from_page(clean_url)
+        if detected:
+            return detected
+        raise ValueError(
+            "Could not detect booking platform from this URL.\n\n"
+            "Please paste the direct booking page URL instead:\n"
+            "• ForeUp: https://foreupsoftware.com/index.php/booking/NNNNN\n"
+            "• GolfNow: https://www.golfnow.com/tee-times/facility/NNNNN-course-name\n"
+            "• TeeItUp: https://course-name.book.teeitup.golf/tee-times"
+        )
 
     from foreup_client import parse_course_url
 
@@ -161,6 +174,57 @@ def resolve_course_from_url(url: str) -> dict:
     save_course(course_id, result)
     logger.info(f"Auto-detected and saved course {course_id}: {result}")
     return result
+
+
+def _detect_from_page(url: str) -> dict:
+    """
+    Fetch a course website page and look for embedded booking platform links.
+    Handles courses that embed ForeUp/TeeItUp/GolfNow widgets on their own site.
+    """
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        html = resp.text
+
+        # Look for TeeItUp embed
+        m = re.search(r'teeitup\.golf[/\w-]*\?facilityId=(\d+)', html)
+        if not m:
+            m = re.search(r'book\.teeitup\.golf.*?facilityId=(\d+)', html)
+        if not m:
+            m = re.search(r'teeitup\.golf/([\w-]+)', html)
+        if m:
+            facility_id = m.group(1) if m.group(1).isdigit() else None
+            # If we got a slug, try to extract from the full URL in the HTML
+            teeitup_url_m = re.search(r'https?://[\w-]+\.book\.teeitup\.golf[^\s"'<>]+', html)
+            if teeitup_url_m:
+                teeitup_url = teeitup_url_m.group(0)
+                logger.info(f"Found TeeItUp URL on page: {teeitup_url}")
+                return _resolve_golfnow(teeitup_url, "teeitup")
+            if facility_id:
+                return _resolve_golfnow(
+                    f"https://book.teeitup.golf/tee-times?facilityId={facility_id}",
+                    "teeitup"
+                )
+
+        # Look for GolfNow embed
+        m = re.search(r'golfnow\.com/tee-times/facility/(\d+)', html)
+        if m:
+            return _resolve_golfnow(
+                f"https://www.golfnow.com/tee-times/facility/{m.group(1)}",
+                "golfnow"
+            )
+
+        # Look for ForeUp embed
+        m = re.search(r'foreupsoftware\.com/index\.php/booking/(\d+)', html)
+        if m:
+            foreup_url = f"https://foreupsoftware.com/index.php/booking/{m.group(1)}"
+            logger.info(f"Found ForeUp URL on page: {foreup_url}")
+            # Recurse with the actual ForeUp URL
+            return resolve_course_from_url(foreup_url)
+
+    except Exception as e:
+        logger.warning(f"Could not fetch page to detect platform: {e}")
+
+    return None
 
 
 def _resolve_golfnow(url: str, platform: str) -> dict:

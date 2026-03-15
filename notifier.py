@@ -73,7 +73,6 @@ def notify_times_available(
     dashboard_url: str = "",
 ) -> bool:
     """Send a tee time alert with a direct link to the ForeUp booking page."""
-    from foreup_client import ForeUpClient
     date      = job.get("target_date", "?")
     time_from = job.get("time_from", "?")
     time_to   = job.get("time_to", "?")
@@ -109,8 +108,13 @@ def notify_times_available(
         f"ForeUp → select Public → {pretty_date}"
     )
 
-    # Link goes straight to the booking page
-    booking_url = f"https://foreupsoftware.com/index.php/booking/{course_id}#/teetimes"
+    # Link goes straight to the booking page — platform-aware
+    platform = job.get("platform", "foreup")
+    if platform in ("teeitup", "golfnow"):
+        from golfnow_client import GolfNowClient
+        booking_url = GolfNowClient.booking_url(course_id, date, int(players), platform)
+    else:
+            booking_url = ForeUpClient.booking_url(course_id, date, int(players))
 
     return send_pushover(
         user_token=user_token,

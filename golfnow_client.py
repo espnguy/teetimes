@@ -1,0 +1,293 @@
+"""
+GolfNow / TeeItUp client.
+
+GolfNow powers booking at thousands of courses via their TeeItUp platform.
+Booking URLs look like:
+  https://www.golfnow.com/tee-times/facility/12345-course-name
+  https://COURSE-NAME.book.teeitup.golf/tee-times
+  https://www.teeitup.com/tee-times?facilityId=12345
+
+No login required to fetch available tee times — GolfNow's API is public.
+Endpoints discovered via DevTools on teeitup.golf booking pages.
+"""
+
+import re
+import logging
+import requests
+from datetime import datetime
+from urllib.parse import urlparse, parse_qs
+
+logger = logging.getLogger(__name__)
+
+# GolfNow public API base
+GOLFNOW_API = "https://api.golfnow.com/v1"
+TEEITUP_API  = "https://api2.teeitup.golf/api"
+
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/143.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json, text/plain, */*",
+    "Origin": "https://www.golfnow.com",
+    "Referer": "https://www.golfnow.com/",
+}
+
+
+def parse_golfnow_url(url: str) -> dict:
+    """
+    Extract facility_id and platform from a GolfNow/TeeItUp URL.
+
+    Supported formats:
+      https://www.golfnow.com/tee-times/facility/12345-course-name
+      https://course-name.book.teeitup.golf/tee-times
+      https://www.teeitup.com/tee-times?facilityId=12345
+      https://book.teeitup.golf/tee-times?courseId=12345
+    """
+    parsed = urlparse(url)
+    qs = parse_qs(parsed.query)
+
+    facility_id = None
+    platform = "golfnow"
+
+    # GolfNow facility URL: /tee-times/facility/12345-name
+    m = re.search(r'/facility/(\d+)', url)
+    if m:
+        facility_id = m.group(1)
+        platform = "golfnow"
+
+    # TeeItUp subdomain: course-name.book.teeitup.golf
+    elif "teeitup.golf" in parsed.netloc or "teeitup.com" in parsed.netloc:
+        platform = "teeitup"
+        # Try query params first
+        facility_id = (
+            qs.get("facilityId", [None])[0] or
+            qs.get("courseId", [None])[0] or
+            qs.get("facility_id", [None])[0]
+        )
+        # Try path: /tee-times/12345
+        if not facility_id:
+            m = re.search(r'/(\d{4,})', parsed.path)
+            if m:
+                facility_id = m.group(1)
+
+    if not facility_id:
+        raise ValueError(
+            "Could not extract facility ID from URL. "
+            "Expected formats:\n"
+            "  https://www.golfnow.com/tee-times/facility/12345-course-name\n"
+            "  https://course-name.book.teeitup.golf/tee-times?facilityId=12345"
+        )
+
+    return {
+        "facility_id": facility_id,
+        "platform": platform,
+        "course_id": facility_id,      # alias used by the rest of the app
+        "schedule_id": facility_id,    # not used for GolfNow but keeps interface consistent
+        "booking_class": "",
+    }
+
+
+class GolfNowClient:
+    """
+    Fetches tee times from GolfNow / TeeItUp.
+    No authentication required for public courses.
+    """
+
+    def __init__(self):
+        self.session = requests.Session()
+        self.session.headers.update(HEADERS)
+
+    def fetch_tee_times(
+        self,
+        course_id: str,
+        schedule_id: str,          # unused, kept for interface compatibility
+        date: str,                 # "MM-DD-YYYY"
+        time_from: str,            # "HH:MM"
+        time_to: str,              # "HH:MM"
+        players: int = 2,
+        holes: int = 18,
+        booking_class: str = "",   # unused
+        platform: str = "teeitup",
+    ) -> list[dict]:
+        """Fetch available tee times and filter to the requested window."""
+
+        # Convert date MM-DD-YYYY → YYYY-MM-DD for GolfNow API
+        try:
+            d = datetime.strptime(date, "%m-%d-%Y")
+            api_date = d.strftime("%Y-%m-%d")
+        except ValueError:
+            api_date = date
+
+        if platform == "teeitup":
+            all_times = self._fetch_teeitup(course_id, api_date, players, holes)
+        else:
+            all_times = self._fetch_golfnow(course_id, api_date, players, holes)
+
+        # Filter by time window
+        from_min = _time_to_minutes(time_from)
+        to_min   = _time_to_minutes(time_to)
+
+        filtered = []
+        for slot in all_times:
+            slot_min = _parse_slot_time(slot.get("time", ""))
+            if slot_min is not None and from_min <= slot_min <= to_min:
+                filtered.append(slot)
+
+        logger.info(
+            f"GolfNow: fetched {len(all_times)} times for facility {course_id} "
+            f"on {date}, {len(filtered)} in window {time_from}–{time_to}"
+        )
+        return filtered
+
+    def _fetch_teeitup(self, facility_id: str, date: str, players: int, holes: int) -> list[dict]:
+        """Fetch from TeeItUp API (used by teeitup.golf booking pages)."""
+        url = f"{TEEITUP_API}/teetimes"
+        params = {
+            "facilityId": facility_id,
+            "date":        date,
+            "players":     players,
+            "holes":       holes,
+        }
+        try:
+            resp = self.session.get(url, params=params, timeout=15)
+            resp.raise_for_status()
+            data = resp.json()
+            return self._normalize_teeitup(data)
+        except Exception as e:
+            logger.warning(f"TeeItUp primary fetch failed: {e}, trying alternate endpoint")
+            return self._fetch_teeitup_alt(facility_id, date, players, holes)
+
+    def _fetch_teeitup_alt(self, facility_id: str, date: str, players: int, holes: int) -> list[dict]:
+        """Alternate TeeItUp endpoint format."""
+        url = f"https://phx-api-be-east-1b.kenna.io/v2/tee-times"
+        params = {
+            "date":       date,
+            "facilityId": facility_id,
+            "players":    players,
+            "holes":      holes,
+        }
+        headers = {
+            **HEADERS,
+            "x-be-alias": facility_id,
+        }
+        resp = self.session.get(url, params=params, headers=headers, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        return self._normalize_teeitup(data)
+
+    def _fetch_golfnow(self, facility_id: str, date: str, players: int, holes: int) -> list[dict]:
+        """Fetch from GolfNow API."""
+        url = f"{GOLFNOW_API}/tee-times/search"
+        params = {
+            "facilityId": facility_id,
+            "date":        date,
+            "players":     players,
+            "holes":       holes,
+            "isHotDeal":   "false",
+        }
+        resp = self.session.get(url, params=params, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        return self._normalize_golfnow(data)
+
+    def _normalize_teeitup(self, data) -> list[dict]:
+        """Normalize TeeItUp response to our standard slot format."""
+        slots = []
+        # TeeItUp wraps in various structures
+        items = []
+        if isinstance(data, list):
+            items = data
+        elif isinstance(data, dict):
+            items = (data.get("teeTimes") or data.get("tee_times") or
+                     data.get("data") or data.get("results") or [])
+
+        for item in items:
+            time_str = (item.get("time") or item.get("teeTime") or
+                        item.get("startTime") or item.get("start_time") or "")
+            slots.append({
+                "time":             time_str,
+                "available_spots":  item.get("availableSpots") or item.get("available_spots") or item.get("openSlots") or 0,
+                "green_fee":        item.get("greenFee") or item.get("green_fee") or item.get("price") or 0,
+                "holes":            item.get("holes") or 18,
+                "rate_type":        item.get("rateType") or item.get("rate_type") or "",
+                "_raw":             item,
+            })
+        return slots
+
+    def _normalize_golfnow(self, data) -> list[dict]:
+        """Normalize GolfNow API response to our standard slot format."""
+        slots = []
+        items = []
+        if isinstance(data, list):
+            items = data
+        elif isinstance(data, dict):
+            items = (data.get("TeeTimes") or data.get("tee_times") or
+                     data.get("Results") or data.get("data") or [])
+
+        for item in items:
+            time_str = (item.get("Time") or item.get("time") or
+                        item.get("TeeTime") or "")
+            spots = (item.get("MaxPlayers") or item.get("AvailableSpots") or
+                     item.get("Holes") or 0)
+            fee = (item.get("GreenFee") or item.get("Price") or
+                   item.get("Rate") or 0)
+            slots.append({
+                "time":             time_str,
+                "available_spots":  spots,
+                "green_fee":        fee,
+                "holes":            item.get("Holes") or 18,
+                "rate_type":        item.get("RateType") or "",
+                "_raw":             item,
+            })
+        return slots
+
+    @staticmethod
+    def booking_url(course_id: str, date: str, players: int = 2, platform: str = "teeitup") -> str:
+        """Build a direct booking URL."""
+        # date is MM-DD-YYYY, convert to YYYY-MM-DD for URL
+        try:
+            d = datetime.strptime(date, "%m-%d-%Y")
+            url_date = d.strftime("%Y-%m-%d")
+        except ValueError:
+            url_date = date
+
+        if platform == "teeitup":
+            return f"https://book.teeitup.golf/tee-times?facilityId={course_id}&date={url_date}&players={players}"
+        else:
+            return f"https://www.golfnow.com/tee-times/facility/{course_id}#date={url_date}&players={players}"
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _time_to_minutes(t: str) -> int:
+    h, m = map(int, t.strip().split(":"))
+    return h * 60 + m
+
+
+def _parse_slot_time(slot_time: str):
+    """Parse various time formats into minutes since midnight."""
+    if not slot_time:
+        return None
+    slot_time = str(slot_time).strip()
+
+    # 'YYYY-MM-DD HH:MM' or 'YYYY-MM-DDTHH:MM'
+    for sep in (" ", "T"):
+        if sep in slot_time:
+            slot_time = slot_time.split(sep)[1]
+            break
+
+    m = re.match(r"^(\d{1,2}):(\d{2})", slot_time)
+    if m:
+        return int(m.group(1)) * 60 + int(m.group(2))
+
+    # Unix epoch
+    if re.match(r"^\d{10,}$", slot_time):
+        try:
+            dt = datetime.fromtimestamp(int(slot_time))
+            return dt.hour * 60 + dt.minute
+        except Exception:
+            pass
+
+    return None

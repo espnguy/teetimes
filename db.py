@@ -65,6 +65,7 @@ def init_db():
                     time_to              TEXT NOT NULL,
                     players              INTEGER NOT NULL,
                     holes                INTEGER DEFAULT 18,
+                    platform             TEXT DEFAULT 'foreup',
                     status               TEXT DEFAULT 'polling',
                     available_times      JSONB DEFAULT '[]',
                     booked_confirmation  JSONB,
@@ -213,13 +214,13 @@ def insert_job(job: dict):
                 INSERT INTO jobs (
                     id, course_id, course_name, schedule_id, booking_class,
                     course_url, target_date, time_from, time_to,
-                    players, holes, status, logs
+                    players, holes, status, platform, logs
                 ) VALUES (
                     %(id)s, %(course_id)s, %(course_name)s, %(schedule_id)s, %(booking_class)s,
                     %(course_url)s, %(target_date)s, %(time_from)s, %(time_to)s,
-                    %(players)s, %(holes)s, %(status)s, %(logs)s
+                    %(players)s, %(holes)s, %(status)s, %(platform)s, %(logs)s
                 )
-            """, {**job, "logs": json.dumps(job.get("logs", []))})
+            """, {**job, "platform": job.get("platform", "foreup"), "logs": json.dumps(job.get("logs", []))})
 
 
 def update_job_fields(job_id: str, fields: dict):

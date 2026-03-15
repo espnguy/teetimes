@@ -49,6 +49,7 @@ class TeeTimeScheduler:
             "time_to":       data["time_to"],
             "players":       int(data["players"]),
             "holes":         int(data.get("holes", 18)),
+            "platform":      data.get("platform", "foreup"),
             "status":        "polling",
             "logs":          [],
         }
@@ -82,12 +83,26 @@ class TeeTimeScheduler:
 
     # ── Poll loop ─────────────────────────────────────────────────────────────
 
+    def _is_expired(self, job: dict) -> bool:
+        """Return True if the job's target date is in the past."""
+        from datetime import datetime, date
+        try:
+            target = datetime.strptime(job["target_date"], "%m-%d-%Y").date()
+            return target < date.today()
+        except Exception:
+            return False
+
     def _poll_loop(self):
         while self._running:
             try:
                 jobs = db.load_all_jobs()
                 for job in jobs:
+                    # Auto-expire jobs whose target date has passed
                     if job["status"] in ("polling", "available"):
+                        if self._is_expired(job):
+                            db.update_job_fields(job["id"], {"status": "expired"})
+                            self._log(job["id"], f"⏰ Job expired — {job['target_date']} has passed.")
+                            continue
                         self._poll_job(job["id"])
             except Exception as e:
                 logger.exception(f"Poll loop error: {e}")
@@ -107,9 +122,16 @@ class TeeTimeScheduler:
             return
 
         try:
-            client = ForeUpClient(email, password)
+            # Use the right client based on platform
+            platform = job.get("platform", "foreup")
+            if platform in ("teeitup", "golfnow"):
+                from golfnow_client import GolfNowClient
+                client = GolfNowClient()
+            else:
+                client = ForeUpClient(email, password)
+
             times = client.fetch_tee_times(
-                course_id=job["course_id"],  # also used for session init
+                course_id=job["course_id"],
                 schedule_id=job["schedule_id"],
                 date=job["target_date"],
                 time_from=job["time_from"],
@@ -117,6 +139,8 @@ class TeeTimeScheduler:
                 players=job["players"],
                 holes=job.get("holes", 18),
                 booking_class=job.get("booking_class", ""),
+                **( {"platform": job.get("platform", "teeitup")}
+                    if job.get("platform") in ("teeitup", "golfnow") else {} ),
             )
 
             now_str = datetime.now().strftime("%H:%M:%S")

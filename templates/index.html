@@ -351,7 +351,11 @@
             </div>
             <div class="job-actions">
               {% if job.status == 'available' %}
+              {% if job.platform in ['teeitup', 'golfnow'] %}
+              <a class="btn btn-confirm btn-sm" href="https://book.teeitup.golf/tee-times?facilityId={{ job.course_id }}" target="_blank">🏌️ Book on GolfNow →</a>
+              {% else %}
               <a class="btn btn-confirm btn-sm" href="https://foreupsoftware.com/index.php/booking/{{ job.course_id }}#/teetimes" target="_blank">🏌️ Book on ForeUp →</a>
+              {% endif %}
               {% endif %}
               <button class="btn btn-outline btn-sm" onclick="toggleLog('{{ job.id }}')">Logs</button>
               <button class="btn btn-danger btn-sm" onclick="removeJob('{{ job.id }}')">✕</button>
@@ -724,6 +728,7 @@ function statusBadge(status) {
     booked:    ['badge-booked',    '✅ Booked'],
     error:     ['badge-error',     '❌ Error'],
     paused:    ['badge-paused',    '⏸ Paused'],
+    expired:   ['badge-paused',    '⌛ Expired'],
   };
   const [cls, label] = map[status] || ['badge-paused', status];
   return `<span class="badge ${cls}">${label}</span>`;

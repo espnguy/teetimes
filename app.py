@@ -107,6 +107,7 @@ def add_job():
         data["schedule_id"]   = course["schedule_id"]
         data["booking_class"] = course["booking_class"]
         data["course_name"]   = course["name"]
+        data["platform"]      = course.get("platform", "foreup")
         job_id = scheduler.add_job(data)
         return jsonify({"success": True, "job_id": job_id, "course": course})
     except Exception as e:

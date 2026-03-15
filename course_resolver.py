@@ -43,20 +43,37 @@ def delete_course(course_id: str):
 
 # ── Auto-detection ─────────────────────────────────────────────────────────────
 
+def detect_platform(url: str) -> str:
+    """Detect which booking platform a URL belongs to."""
+    url_lower = url.lower()
+    if "teeitup.golf" in url_lower or "teeitup.com" in url_lower:
+        return "teeitup"
+    if "golfnow.com" in url_lower:
+        return "golfnow"
+    if "foreupsoftware.com" in url_lower or "foreup" in url_lower:
+        return "foreup"
+    # Default — try foreup
+    return "foreup"
+
+
 def resolve_course_from_url(url: str) -> dict:
     """
-    Given a ForeUp booking URL, return:
-      {course_id, schedule_id, booking_class, name, url}
+    Given a booking URL (ForeUp or GolfNow/TeeItUp), return:
+      {course_id, schedule_id, booking_class, name, url, platform}
 
     Strategy:
-      1. Check saved courses first
-      2. Parse any IDs already in the URL/query string
-      3. Fetch the booking page and scrape the JS config
+      1. Detect platform
+      2. Check saved courses first
+      3. Parse IDs from the URL
+      4. Fetch the page and scrape config if needed
     """
-    from foreup_client import parse_course_url
-
-    # Clean up the URL
+    platform = detect_platform(url)
     clean_url = url.split("#")[0].rstrip("/")
+
+    if platform in ("teeitup", "golfnow"):
+        return _resolve_golfnow(clean_url, platform)
+
+    from foreup_client import parse_course_url
 
     # Step 1 — try basic parse first to get course_id
     try:
@@ -143,6 +160,45 @@ def resolve_course_from_url(url: str) -> dict:
 
     save_course(course_id, result)
     logger.info(f"Auto-detected and saved course {course_id}: {result}")
+    return result
+
+
+def _resolve_golfnow(url: str, platform: str) -> dict:
+    """Resolve a GolfNow/TeeItUp course URL."""
+    from golfnow_client import parse_golfnow_url
+    info = parse_golfnow_url(url)
+    facility_id = info["facility_id"]
+
+    # Check saved courses
+    courses = db.load_courses()
+    if facility_id in courses:
+        saved = courses[facility_id]
+        logger.info(f"Using saved GolfNow course {facility_id}: {saved.get('name')}")
+        return saved
+
+    # Try to get the course name by fetching the page
+    name = f"Course {facility_id}"
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        m = re.search(r'<title>([^<]+)</title>', resp.text, re.IGNORECASE)
+        if m:
+            raw_name = m.group(1).strip()
+            name = re.sub(r'\s*[-|–]\s*(GolfNow|TeeItUp|Tee Times|Book).*', '', raw_name, flags=re.IGNORECASE).strip()
+            if not name:
+                name = f"Course {facility_id}"
+    except Exception as e:
+        logger.warning(f"Could not fetch GolfNow page for name: {e}")
+
+    result = {
+        "course_id":     facility_id,
+        "schedule_id":   facility_id,
+        "booking_class": "",
+        "name":          name,
+        "url":           url,
+        "platform":      platform,
+    }
+    db.save_course(facility_id, result)
+    logger.info(f"Saved GolfNow course {facility_id}: {name}")
     return result
 
 

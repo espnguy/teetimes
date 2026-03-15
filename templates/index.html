@@ -307,7 +307,7 @@
         <li>Set your <strong>target date and preferred time window</strong></li>
         <li>Click <strong>"Start Watching"</strong> — the server polls every 2 min</li>
         <li>When a tee time appears, the job turns <span style="color:#15803d;font-weight:700">green</span></li>
-        <li>Click <strong>"View & Confirm"</strong> to see options and book</li>
+        <li>Tap the <strong>Pushover notification</strong> or click <strong>"Book on ForeUp"</strong> to open the booking page</li>
       </ol>
       <div class="divider"></div>
       <div style="font-size:.82rem;color:var(--gray)">
@@ -351,7 +351,7 @@
             </div>
             <div class="job-actions">
               {% if job.status == 'available' %}
-              <button class="btn btn-confirm btn-sm" onclick="openConfirm('{{ job.id }}')">🏌️ View & Confirm</button>
+              <a class="btn btn-confirm btn-sm" href="https://foreupsoftware.com/index.php/booking/{{ job.course_id }}#/teetimes" target="_blank">🏌️ Book on ForeUp →</a>
               {% endif %}
               <button class="btn btn-outline btn-sm" onclick="toggleLog('{{ job.id }}')">Logs</button>
               <button class="btn btn-danger btn-sm" onclick="removeJob('{{ job.id }}')">✕</button>
@@ -405,24 +405,7 @@
 
 
 
-<!-- Confirmation Modal -->
-<div class="modal-backdrop" id="confirmModal">
-  <div class="modal">
-    <h3>🏌️ Confirm Tee Time</h3>
-    <p id="modalDate" style="color:var(--gray);font-size:.88rem;margin-bottom:16px"></p>
-    <div id="modalSlots"></div>
-    <div id="modalLoading" style="text-align:center;padding:20px;display:none">
-      <div class="spinner" style="width:28px;height:28px;margin:auto"></div>
-      <p style="margin-top:10px;color:var(--gray)">Booking...</p>
-    </div>
-    <div class="modal-actions">
-      <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
-      <button class="btn btn-confirm" onclick="confirmBook()" id="confirmBtn" disabled>
-        ✅ Book Selected Time
-      </button>
-    </div>
-  </div>
-</div>
+
 
 <div id="toast"></div>
 
@@ -721,9 +704,9 @@ function renderJob(job) {
       </div>
       <div class="job-actions">
         ${job.status === 'available' ? `
-          <button class="btn btn-confirm btn-sm" onclick="openConfirm('${job.id}')">
-            🏌️ View & Confirm
-          </button>` : ''}
+          <a class="btn btn-confirm btn-sm" href="https://foreupsoftware.com/index.php/booking/${job.course_id}#/teetimes" target="_blank">
+            🏌️ Book on ForeUp →
+          </a>` : ''}
         <button class="btn btn-outline btn-sm" onclick="toggleLog('${job.id}')">Logs</button>
         <button class="btn btn-danger btn-sm" onclick="removeJob('${job.id}')">✕</button>
       </div>
@@ -756,94 +739,6 @@ async function removeJob(jobId) {
   refreshJobs();
 }
 
-// ── Confirmation modal ─────────────────────────────────────────────────────
-async function openConfirm(jobId) {
-  activeJobId = jobId;
-  selectedTime = null;
-  document.getElementById('confirmBtn').disabled = true;
-  document.getElementById('modalSlots').innerHTML =
-    '<div style="text-align:center;padding:20px"><div class="spinner" style="width:28px;height:28px;margin:auto"></div></div>';
-  document.getElementById('confirmModal').classList.add('open');
-
-  try {
-    const res = await fetch(`/api/available_times/${jobId}`);
-    const data = await res.json();
-
-    if (data.error) {
-      document.getElementById('modalSlots').innerHTML =
-        `<p style="color:var(--red)">Error: ${escHtml(data.error)}</p>`;
-      return;
-    }
-
-    const times = data.times || [];
-    if (times.length === 0) {
-      document.getElementById('modalSlots').innerHTML =
-        '<p style="color:var(--gray)">No times found in your window. They may have just been taken.</p>';
-      return;
-    }
-
-    // Get date label from first job
-    const res2 = await fetch('/api/jobs');
-    const jobs = await res2.json();
-    const job = jobs.find(j => j.id === jobId);
-    if (job) document.getElementById('modalDate').textContent =
-      `${job.target_date} · ${job.players} players · ${job.holes || 18} holes`;
-
-    document.getElementById('modalSlots').innerHTML = times.map((t, i) => `
-      <div class="time-slot" id="slot-${i}" onclick="selectSlot(${i}, this)" data-time='${JSON.stringify(t)}'>
-        <div class="time-slot-time">${formatSlotTime(t.time)}</div>
-        <div class="time-slot-meta">
-          ${t.available_spots || '?'} spots available
-          ${t.green_fee !== undefined ? ` · $${t.green_fee} green fee` : ''}
-          ${t.holes ? ` · ${t.holes} holes` : ''}
-        </div>
-      </div>`).join('');
-  } catch(e) {
-    document.getElementById('modalSlots').innerHTML =
-      `<p style="color:var(--red)">Error loading times: ${e.message}</p>`;
-  }
-}
-
-function selectSlot(index, el) {
-  document.querySelectorAll('.time-slot').forEach(s => s.classList.remove('selected'));
-  el.classList.add('selected');
-  selectedTime = JSON.parse(el.dataset.time);
-  document.getElementById('confirmBtn').disabled = false;
-}
-
-function closeModal() {
-  document.getElementById('confirmModal').classList.remove('open');
-  activeJobId = null; selectedTime = null;
-}
-
-async function confirmBook() {
-  if (!activeJobId || !selectedTime) return;
-
-  const btn = document.getElementById('confirmBtn');
-  btn.disabled = true;
-  document.getElementById('modalLoading').style.display = 'block';
-
-  try {
-    const res = await fetch('/api/book', {
-      method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ job_id: activeJobId, time_data: selectedTime })
-    });
-    const data = await res.json();
-    if (data.error) {
-      toast('Booking failed: ' + data.error, 'error');
-      btn.disabled = false;
-    } else {
-      toast('🎉 Tee time booked!', 'success');
-      closeModal();
-      refreshJobs();
-    }
-  } catch(e) {
-    toast('Network error: ' + e.message, 'error');
-    btn.disabled = false;
-  } finally {
-    document.getElementById('modalLoading').style.display = 'none';
-  }
-}
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 function formatSlotTime(t) {

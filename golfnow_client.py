@@ -356,23 +356,15 @@ class GolfNowClient:
             facility = group.get("facility") or {}
             course_name = facility.get("name", "")
 
-            # Time is at group level — could be a string or dict
-            raw_time = group.get("time") or group.get("timeHour") or ""
+            # time is a dict: {"date": "2026-03-20T15:20:00+00:00", "formatted": "3:20", ...}
+            raw_time = group.get("time") or {}
             if isinstance(raw_time, dict):
-                # e.g. {"hour": 7, "minute": 0} or {"time": "2026-03-20T07:00:00"}
-                time_str = (
-                    raw_time.get("time") or raw_time.get("teeTime") or
-                    raw_time.get("startTime") or ""
-                )
-                if not time_str and "hour" in raw_time:
-                    h = raw_time.get("hour", 0)
-                    m = raw_time.get("minute", 0)
-                    # We need the date — pull from group or use a placeholder
-                    time_str = f"{h:02d}:{m:02d}"
+                time_str = raw_time.get("date") or ""
             else:
                 time_str = str(raw_time)
+            # Normalize to "YYYY-MM-DD HH:MM"
             if "T" in time_str:
-                time_str = time_str.replace("T", " ")[:16]
+                time_str = time_str.split("+")[0].split("Z")[0].replace("T", " ")[:16]
 
             rates = group.get("teeTimeRates") or []
             if not rates:

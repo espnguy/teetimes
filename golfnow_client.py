@@ -338,7 +338,12 @@ class GolfNowClient:
     def _normalize_golfnow(self, data) -> list[dict]:
         """
         Normalize GolfNow API response.
-        Confirmed structure: { ttResults: { teeTimes: [ { facility: {...}, rates: [...] } ] } }
+        Confirmed structure:
+          ttResults.teeTimes[] = {
+            facility: {...},
+            time: "2026-03-20T07:00:00",   ← tee time
+            teeTimeRates: [ { holeCount, playerRule, singlePlayerPrice, ... } ]
+          }
         """
         slots = []
         tee_times = []
@@ -348,35 +353,49 @@ class GolfNowClient:
         for group in tee_times:
             facility = group.get("facility") or {}
             course_name = facility.get("name", "")
-            rates = group.get("rates") or []
 
-            for rate in rates:
-                tee = rate.get("teeTime") or rate
-                time_str = (
-                    tee.get("time") or tee.get("teeTime") or
-                    rate.get("time") or rate.get("startTime") or ""
-                )
-                # ISO format "2026-03-20T07:00:00" → "2026-03-20 07:00"
-                if "T" in str(time_str):
-                    time_str = time_str.replace("T", " ")[:16]
+            # Time is at group level
+            time_str = group.get("time") or ""
+            if "T" in str(time_str):
+                time_str = time_str.replace("T", " ")[:16]  # "2026-03-20 07:00"
 
-                spots = (
-                    rate.get("availableSpots") or rate.get("maxPlayers") or
-                    rate.get("riders") or tee.get("availableSpots") or 0
-                )
-                fee = rate.get("greenFee") or rate.get("price") or rate.get("totalPrice") or 0
-                if isinstance(fee, dict):
-                    fee = fee.get("amount") or fee.get("value") or 0
-
+            rates = group.get("teeTimeRates") or []
+            if not rates:
+                # No rates but time exists — still show as a slot
                 slots.append({
                     "time":            time_str,
-                    "available_spots": spots,
-                    "green_fee":       fee,
-                    "holes":           rate.get("holes") or 18,
-                    "rate_type":       rate.get("rateType") or rate.get("rateName") or "",
+                    "available_spots": 4,
+                    "green_fee":       0,
+                    "holes":           18,
+                    "rate_type":       "",
                     "course_name":     course_name,
-                    "_raw":            rate,
+                    "_raw":            group,
                 })
+                continue
+
+            # Use cheapest/first rate for price info
+            rate = rates[0]
+            fee = 0
+            try:
+                price_obj = rate.get("singlePlayerPrice") or {}
+                due = price_obj.get("dueAtCourse") or price_obj.get("total") or {}
+                fee = due.get("value") or 0
+            except Exception:
+                pass
+
+            # playerRule tells us group sizes allowed e.g. "TwoFour"
+            player_rule = rate.get("playerRule", "")
+            spots = 4 if "Four" in player_rule else 2
+
+            slots.append({
+                "time":            time_str,
+                "available_spots": spots,
+                "green_fee":       fee,
+                "holes":           rate.get("holeCount") or 18,
+                "rate_type":       player_rule,
+                "course_name":     course_name,
+                "_raw":            group,
+            })
 
         logger.info(f"GolfNow normalized {len(slots)} slots from {len(tee_times)} groups")
         return slots

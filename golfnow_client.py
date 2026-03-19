@@ -57,14 +57,15 @@ def parse_golfnow_url(url: str) -> dict:
         facility_id = m.group(1)
         platform = "golfnow"
 
-    # TeeItUp subdomain: course-name.book.teeitup.golf
+    # TeeItUp: course-name.book.teeitup.golf or course-name.book.teeitup.com
     elif "teeitup.golf" in parsed.netloc or "teeitup.com" in parsed.netloc:
         platform = "teeitup"
-        # Try query params first
+        # Try all known query param names including 'course'
         facility_id = (
             qs.get("facilityId", [None])[0] or
             qs.get("courseId", [None])[0] or
-            qs.get("facility_id", [None])[0]
+            qs.get("facility_id", [None])[0] or
+            qs.get("course", [None])[0]
         )
         # Try path: /tee-times/12345
         if not facility_id:

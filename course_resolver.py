@@ -46,7 +46,7 @@ def delete_course(course_id: str):
 def detect_platform(url: str) -> str:
     """Detect which booking platform a URL belongs to."""
     url_lower = url.lower()
-    if "teeitup.golf" in url_lower or "teeitup.com" in url_lower:
+    if "teeitup.golf" in url_lower or "teeitup.com" in url_lower or "book.teeitup" in url_lower:
         return "teeitup"
     if "golfnow.com" in url_lower:
         return "golfnow"
@@ -194,7 +194,7 @@ def _detect_from_page(url: str) -> dict:
         if m:
             facility_id = m.group(1) if m.group(1).isdigit() else None
             # If we got a slug, try to extract from the full URL in the HTML
-            teeitup_url_m = re.search(r"https?://[^\s<>\"']+teeitup[^\s<>\"']+", html)
+            teeitup_url_m = re.search(r"https?://[\w-]+\.book\.teeitup\.golf[^\s\"'<>]+", html)
             if teeitup_url_m:
                 teeitup_url = teeitup_url_m.group(0)
                 logger.info(f"Found TeeItUp URL on page: {teeitup_url}")

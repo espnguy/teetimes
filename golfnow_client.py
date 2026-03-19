@@ -327,30 +327,49 @@ class GolfNowClient:
         return slots
 
     def _normalize_golfnow(self, data) -> list[dict]:
-        """Normalize GolfNow API response to our standard slot format."""
+        """
+        Normalize GolfNow API response.
+        Confirmed structure: { ttResults: { teeTimes: [ { facility: {...}, rates: [...] } ] } }
+        """
         slots = []
-        items = []
-        if isinstance(data, list):
-            items = data
-        elif isinstance(data, dict):
-            items = (data.get("TeeTimes") or data.get("tee_times") or
-                     data.get("Results") or data.get("data") or [])
+        tee_times = []
+        if isinstance(data, dict):
+            tee_times = (data.get("ttResults") or {}).get("teeTimes") or []
 
-        for item in items:
-            time_str = (item.get("Time") or item.get("time") or
-                        item.get("TeeTime") or "")
-            spots = (item.get("MaxPlayers") or item.get("AvailableSpots") or
-                     item.get("Holes") or 0)
-            fee = (item.get("GreenFee") or item.get("Price") or
-                   item.get("Rate") or 0)
-            slots.append({
-                "time":             time_str,
-                "available_spots":  spots,
-                "green_fee":        fee,
-                "holes":            item.get("Holes") or 18,
-                "rate_type":        item.get("RateType") or "",
-                "_raw":             item,
-            })
+        for group in tee_times:
+            facility = group.get("facility") or {}
+            course_name = facility.get("name", "")
+            rates = group.get("rates") or []
+
+            for rate in rates:
+                tee = rate.get("teeTime") or rate
+                time_str = (
+                    tee.get("time") or tee.get("teeTime") or
+                    rate.get("time") or rate.get("startTime") or ""
+                )
+                # ISO format "2026-03-20T07:00:00" → "2026-03-20 07:00"
+                if "T" in str(time_str):
+                    time_str = time_str.replace("T", " ")[:16]
+
+                spots = (
+                    rate.get("availableSpots") or rate.get("maxPlayers") or
+                    rate.get("riders") or tee.get("availableSpots") or 0
+                )
+                fee = rate.get("greenFee") or rate.get("price") or rate.get("totalPrice") or 0
+                if isinstance(fee, dict):
+                    fee = fee.get("amount") or fee.get("value") or 0
+
+                slots.append({
+                    "time":            time_str,
+                    "available_spots": spots,
+                    "green_fee":       fee,
+                    "holes":           rate.get("holes") or 18,
+                    "rate_type":       rate.get("rateType") or rate.get("rateName") or "",
+                    "course_name":     course_name,
+                    "_raw":            rate,
+                })
+
+        logger.info(f"GolfNow normalized {len(slots)} slots from {len(tee_times)} groups")
         return slots
 
     @staticmethod

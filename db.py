@@ -75,6 +75,17 @@ def init_db():
                     logs                 JSONB DEFAULT '[]'
                 )
             """)
+            # ── Migrations: add columns that may not exist in older DBs ──
+            migrations = [
+                "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS platform TEXT DEFAULT 'foreup'",
+                "ALTER TABLE courses ADD COLUMN IF NOT EXISTS platform TEXT DEFAULT 'foreup'",
+            ]
+            for sql in migrations:
+                try:
+                    cur.execute(sql)
+                except Exception as e:
+                    logger.warning(f"Migration skipped ({e})")
+
     logger.info("Database initialized")
 
 

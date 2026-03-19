@@ -240,15 +240,22 @@ def _resolve_golfnow(url: str, platform: str) -> dict:
         logger.info(f"Using saved GolfNow course {facility_id}: {saved.get('name')}")
         return saved
 
-    # Try to get the course name from the subdomain or page title
+    # Try to get the course name from the URL itself first
     from urllib.parse import urlparse as _urlparse
     parsed_url = _urlparse(url)
-    # Extract from subdomain: "pecan-hollow-golf-course.book.teeitup.com" -> "Pecan Hollow Golf Course"
-    subdomain = parsed_url.netloc.split(".book.")[0] if ".book." in parsed_url.netloc else ""
-    if subdomain and subdomain not in ("www", "book"):
-        name = subdomain.replace("-", " ").title()
-    else:
-        name = f"Course {facility_id}"
+    name = f"Course {facility_id}"  # fallback
+
+    # GolfNow: /tee-times/facility/1307-pecan-hollow-golf-course -> "Pecan Hollow Golf Course"
+    import re as _re
+    gn_match = _re.search(r'/facility/\d+-(.+?)(?:/|$)', parsed_url.path)
+    if gn_match:
+        name = gn_match.group(1).replace("-", " ").title()
+
+    # TeeItUp subdomain: "pecan-hollow-golf-course.book.teeitup.com" -> "Pecan Hollow Golf Course"
+    elif ".book." in parsed_url.netloc:
+        subdomain = parsed_url.netloc.split(".book.")[0]
+        if subdomain and subdomain not in ("www", "book"):
+            name = subdomain.replace("-", " ").title()
 
     # Fetch page once — reuse for both name and ObjectId extraction
     resp = None

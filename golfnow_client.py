@@ -252,18 +252,6 @@ class GolfNowClient:
         if not resp.text.strip():
             raise ValueError(f"GolfNow returned empty response (status {resp.status_code})")
         data = resp.json()
-        # Log first group keys to find the tee time field name
-        try:
-            first = data["ttResults"]["teeTimes"][0]
-            logger.info(f"GolfNow first group keys: {list(first.keys())}")
-            for k, v in first.items():
-                if k != "facility":
-                    logger.info(f"GolfNow['{k}']: {str(v)[:400]}")
-                    break
-            # Also log the time field specifically
-            logger.info(f"GolfNow time field: {str(first.get('time'))[:200]}")
-        except Exception as e:
-            logger.info(f"GolfNow debug error: {e}")
         return self._normalize_golfnow(data)
 
     def _normalize_teeitup(self, data) -> list[dict]:

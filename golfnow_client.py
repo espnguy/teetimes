@@ -260,6 +260,8 @@ class GolfNowClient:
                 if k != "facility":
                     logger.info(f"GolfNow['{k}']: {str(v)[:400]}")
                     break
+            # Also log the time field specifically
+            logger.info(f"GolfNow time field: {str(first.get('time'))[:200]}")
         except Exception as e:
             logger.info(f"GolfNow debug error: {e}")
         return self._normalize_golfnow(data)
@@ -354,10 +356,23 @@ class GolfNowClient:
             facility = group.get("facility") or {}
             course_name = facility.get("name", "")
 
-            # Time is at group level
-            time_str = group.get("time") or ""
-            if "T" in str(time_str):
-                time_str = time_str.replace("T", " ")[:16]  # "2026-03-20 07:00"
+            # Time is at group level — could be a string or dict
+            raw_time = group.get("time") or group.get("timeHour") or ""
+            if isinstance(raw_time, dict):
+                # e.g. {"hour": 7, "minute": 0} or {"time": "2026-03-20T07:00:00"}
+                time_str = (
+                    raw_time.get("time") or raw_time.get("teeTime") or
+                    raw_time.get("startTime") or ""
+                )
+                if not time_str and "hour" in raw_time:
+                    h = raw_time.get("hour", 0)
+                    m = raw_time.get("minute", 0)
+                    # We need the date — pull from group or use a placeholder
+                    time_str = f"{h:02d}:{m:02d}"
+            else:
+                time_str = str(raw_time)
+            if "T" in time_str:
+                time_str = time_str.replace("T", " ")[:16]
 
             rates = group.get("teeTimeRates") or []
             if not rates:

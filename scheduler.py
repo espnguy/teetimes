@@ -131,6 +131,13 @@ class TeeTimeScheduler:
             else:
                 client = ForeUpClient(email, password)
 
+            extra = {}
+            if platform in ("teeitup", "golfnow"):
+                extra["platform"] = platform
+                # Pass be_alias for X-Be-Alias header (TeeItUp/Kenna)
+                if job.get("be_alias"):
+                    extra["be_alias"] = job["be_alias"]
+
             times = client.fetch_tee_times(
                 course_id=job["course_id"],
                 schedule_id=job["schedule_id"],
@@ -140,8 +147,7 @@ class TeeTimeScheduler:
                 players=job["players"],
                 holes=job.get("holes", 18),
                 booking_class=job.get("booking_class", ""),
-                **( {"platform": job.get("platform", "teeitup")}
-                    if job.get("platform") in ("teeitup", "golfnow") else {} ),
+                **extra,
             )
 
             now_str = datetime.now().strftime("%H:%M:%S")

@@ -107,6 +107,7 @@ def add_job():
         data["schedule_id"]   = course["schedule_id"]
         data["booking_class"] = course["booking_class"]
         data["course_name"]   = course["name"]
+        data["be_alias"]      = course.get("be_alias", "")
         # Detect platform from URL if not stored on the course
         stored_platform = course.get("platform")
         if not stored_platform or stored_platform == "foreup":

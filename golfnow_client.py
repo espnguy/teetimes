@@ -111,6 +111,7 @@ class GolfNowClient:
         holes: int = 18,
         booking_class: str = "",   # unused
         platform: str = "teeitup",
+        **kwargs,
     ) -> list[dict]:
         """Fetch available tee times and filter to the requested window."""
 
@@ -122,7 +123,9 @@ class GolfNowClient:
             api_date = date
 
         if platform == "teeitup":
-            all_times = self._fetch_teeitup(course_id, api_date, players, holes)
+            # be_alias is the subdomain slug for X-Be-Alias header
+            be_alias = kwargs.get("be_alias", "")
+            all_times = self._fetch_teeitup(course_id, api_date, players, holes, be_alias=be_alias)
         else:
             all_times = self._fetch_golfnow(course_id, api_date, players, holes)
 
@@ -142,41 +145,44 @@ class GolfNowClient:
         )
         return filtered
 
-    def _fetch_teeitup(self, facility_id: str, date: str, players: int, holes: int) -> list[dict]:
-        """Fetch from TeeItUp API (used by teeitup.golf booking pages)."""
-        url = f"{TEEITUP_API}/teetimes"
-        params = {
-            "facilityId": facility_id,
-            "date":        date,
-            "players":     players,
-            "holes":       holes,
-        }
-        try:
-            resp = self.session.get(url, params=params, timeout=15)
-            resp.raise_for_status()
-            data = resp.json()
-            return self._normalize_teeitup(data)
-        except Exception as e:
-            logger.warning(f"TeeItUp primary fetch failed: {e}, trying alternate endpoint")
-            return self._fetch_teeitup_alt(facility_id, date, players, holes)
+    def _fetch_teeitup(
+        self,
+        facility_id: str,
+        date: str,
+        players: int,
+        holes: int,
+        be_alias: str = "",
+    ) -> list[dict]:
+        """
+        Fetch from TeeItUp (powered by Kenna/Lightspeed Golf).
 
-    def _fetch_teeitup_alt(self, facility_id: str, date: str, players: int, holes: int) -> list[dict]:
-        """Alternate TeeItUp endpoint format."""
-        url = f"https://phx-api-be-east-1b.kenna.io/v2/tee-times"
-        params = {
-            "date":       date,
-            "facilityId": facility_id,
-            "players":    players,
-            "holes":      holes,
-        }
-        headers = {
+        Confirmed endpoint (from DevTools):
+          GET https://phx-api-be-east-1b.kenna.io/course/{objectId}/tee-time/locks?localDate=YYYY-MM-DD
+          Headers: X-Be-Alias: {subdomain-slug}  (e.g. "pecan-hollow-golf-course")
+                   Origin/Referer: https://{slug}.book.teeitup.golf
+
+        facility_id should be the 24-char hex Kenna ObjectId, stored during course resolution.
+        be_alias is the subdomain slug used in X-Be-Alias header.
+        """
+        kenna_base = "https://phx-api-be-east-1b.kenna.io"
+        alias = be_alias or facility_id
+
+        kenna_headers = {
             **HEADERS,
-            "x-be-alias": facility_id,
+            "Origin":     f"https://{alias}.book.teeitup.golf",
+            "Referer":    f"https://{alias}.book.teeitup.golf/",
+            "X-Be-Alias": alias,
         }
-        resp = self.session.get(url, params=params, headers=headers, timeout=15)
+
+        url = f"{kenna_base}/course/{facility_id}/tee-time/locks"
+        params = {"localDate": date}
+
+        resp = self.session.get(url, params=params, headers=kenna_headers, timeout=15)
         resp.raise_for_status()
         data = resp.json()
-        return self._normalize_teeitup(data)
+        slots = self._normalize_kenna(data)
+        logger.info(f"TeeItUp/Kenna: got {len(slots)} slots from {url}")
+        return slots
 
     def _fetch_golfnow(self, facility_id: str, date: str, players: int, holes: int) -> list[dict]:
         """Fetch from GolfNow API."""
@@ -214,6 +220,53 @@ class GolfNowClient:
                 "holes":            item.get("holes") or 18,
                 "rate_type":        item.get("rateType") or item.get("rate_type") or "",
                 "_raw":             item,
+            })
+        return slots
+
+    def _normalize_kenna(self, data) -> list[dict]:
+        """
+        Normalize Kenna/TeeItUp response.
+        Confirmed response shape from DevTools:
+          The /course/{id}/tee-time/locks endpoint returns a list of lock objects.
+        """
+        slots = []
+        # Response may be a list directly or wrapped in a key
+        items = []
+        if isinstance(data, list):
+            items = data
+        elif isinstance(data, dict):
+            items = (data.get("teeTimes") or data.get("locks") or
+                     data.get("data") or data.get("results") or [])
+
+        for item in items:
+            # Extract time — try various field names
+            time_str = (
+                item.get("localTime") or item.get("startTime") or
+                item.get("time") or item.get("localStartTime") or
+                item.get("teeTime") or ""
+            )
+            # If time is just HH:MM, prefix with date
+            if time_str and len(time_str) <= 8 and ":" in time_str:
+                date_val = item.get("localDate") or item.get("date") or ""
+                if date_val:
+                    time_str = f"{date_val} {time_str}"
+
+            spots = (
+                item.get("availableSpots") or item.get("available_spots") or
+                item.get("openSpots") or item.get("maxPlayers") or
+                item.get("spotsAvailable") or 0
+            )
+            fee = (
+                item.get("greenFee") or item.get("green_fee") or
+                item.get("price") or item.get("rate") or 0
+            )
+            slots.append({
+                "time":            time_str,
+                "available_spots": spots,
+                "green_fee":       fee,
+                "holes":           item.get("holes") or 18,
+                "rate_type":       item.get("rateType") or "",
+                "_raw":            item,
             })
         return slots
 

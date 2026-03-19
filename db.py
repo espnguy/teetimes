@@ -79,6 +79,8 @@ def init_db():
             migrations = [
                 "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS platform TEXT DEFAULT 'foreup'",
                 "ALTER TABLE courses ADD COLUMN IF NOT EXISTS platform TEXT DEFAULT 'foreup'",
+                "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS be_alias TEXT DEFAULT ''",
+                "ALTER TABLE courses ADD COLUMN IF NOT EXISTS be_alias TEXT DEFAULT ''",
             ]
             for sql in migrations:
                 try:
@@ -167,14 +169,15 @@ def save_course(course_id: str, info: dict):
         with get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
-                    INSERT INTO courses (course_id, schedule_id, booking_class, name, url, platform)
-                    VALUES (%s, %s, %s, %s, %s, %s)
+                    INSERT INTO courses (course_id, schedule_id, booking_class, name, url, platform, be_alias)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (course_id) DO UPDATE SET
                         schedule_id   = EXCLUDED.schedule_id,
                         booking_class = EXCLUDED.booking_class,
                         name          = EXCLUDED.name,
                         url           = EXCLUDED.url,
-                        platform      = EXCLUDED.platform
+                        platform      = EXCLUDED.platform,
+                        be_alias      = EXCLUDED.be_alias
                 """, (
                     course_id,
                     info["schedule_id"],
@@ -182,6 +185,7 @@ def save_course(course_id: str, info: dict):
                     info["name"],
                     info["url"],
                     info.get("platform", "foreup"),
+                    info.get("be_alias", ""),
                 ))
         logger.info(f"Saved course {course_id}: {info['name']} (platform={info.get('platform','foreup')})")
     except Exception as e:
@@ -227,13 +231,13 @@ def insert_job(job: dict):
                 INSERT INTO jobs (
                     id, course_id, course_name, schedule_id, booking_class,
                     course_url, target_date, time_from, time_to,
-                    players, holes, status, platform, logs
+                    players, holes, status, platform, be_alias, logs
                 ) VALUES (
                     %(id)s, %(course_id)s, %(course_name)s, %(schedule_id)s, %(booking_class)s,
                     %(course_url)s, %(target_date)s, %(time_from)s, %(time_to)s,
-                    %(players)s, %(holes)s, %(status)s, %(platform)s, %(logs)s
+                    %(players)s, %(holes)s, %(status)s, %(platform)s, %(be_alias)s, %(logs)s
                 )
-            """, {**job, "platform": job.get("platform", "foreup"), "logs": json.dumps(job.get("logs", []))})
+            """, {**job, "platform": job.get("platform", "foreup"), "be_alias": job.get("be_alias", ""), "logs": json.dumps(job.get("logs", []))})
 
 
 def update_job_fields(job_id: str, fields: dict):

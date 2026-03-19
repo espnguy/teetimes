@@ -250,7 +250,8 @@ def _resolve_golfnow(url: str, platform: str) -> dict:
     else:
         name = f"Course {facility_id}"
 
-    # Try page title as fallback/override if it looks better
+    # Fetch page once — reuse for both name and ObjectId extraction
+    resp = None
     try:
         resp = requests.get(url, headers=HEADERS, timeout=15)
         m = re.search(r'<title>([^<]+)</title>', resp.text, re.IGNORECASE)
@@ -263,17 +264,44 @@ def _resolve_golfnow(url: str, platform: str) -> dict:
                 name = cleaned
     except Exception as e:
         logger.warning(f"Could not fetch GolfNow page for name: {e}")
+        resp = None
+
+    # For TeeItUp, try to scrape the Kenna ObjectId from the page JS
+    # The real API uses a 24-char hex ObjectId, not the numeric course param
+    kenna_id = facility_id  # fallback to numeric id
+    be_alias = ""
+    if platform == "teeitup":
+        try:
+            if not resp:
+                resp = requests.get(url, headers=HEADERS, timeout=15)
+            # Look for the ObjectId in the page JS bundles/config
+            m = re.search(r'"courseId"\s*:\s*"([a-f0-9]{24})"', resp.text)
+            if not m:
+                m = re.search(r'/course/([a-f0-9]{24})/', resp.text)
+            if not m:
+                m = re.search(r'"_id"\s*:\s*"([a-f0-9]{24})"', resp.text)
+            if m:
+                kenna_id = m.group(1)
+                logger.info(f"Extracted Kenna ObjectId: {kenna_id}")
+            # Extract subdomain slug for X-Be-Alias header
+            from urllib.parse import urlparse as _up
+            _parsed = _up(url)
+            if ".book." in _parsed.netloc:
+                be_alias = _parsed.netloc.split(".book.")[0]
+        except Exception as e:
+            logger.warning(f"Could not extract Kenna ObjectId: {e}")
 
     result = {
-        "course_id":     facility_id,
-        "schedule_id":   facility_id,
+        "course_id":     kenna_id,      # Kenna ObjectId for the API
+        "schedule_id":   kenna_id,
         "booking_class": "",
         "name":          name,
         "url":           url,
         "platform":      platform,
+        "be_alias":      be_alias,      # subdomain slug for X-Be-Alias header
     }
-    db.save_course(facility_id, result)
-    logger.info(f"Saved GolfNow course {facility_id}: {name}")
+    db.save_course(kenna_id, result)
+    logger.info(f"Saved GolfNow course {kenna_id}: {name} (alias={be_alias})")
     return result
 
 

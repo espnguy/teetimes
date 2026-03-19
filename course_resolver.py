@@ -240,16 +240,27 @@ def _resolve_golfnow(url: str, platform: str) -> dict:
         logger.info(f"Using saved GolfNow course {facility_id}: {saved.get('name')}")
         return saved
 
-    # Try to get the course name by fetching the page
-    name = f"Course {facility_id}"
+    # Try to get the course name from the subdomain or page title
+    from urllib.parse import urlparse as _urlparse
+    parsed_url = _urlparse(url)
+    # Extract from subdomain: "pecan-hollow-golf-course.book.teeitup.com" -> "Pecan Hollow Golf Course"
+    subdomain = parsed_url.netloc.split(".book.")[0] if ".book." in parsed_url.netloc else ""
+    if subdomain and subdomain not in ("www", "book"):
+        name = subdomain.replace("-", " ").title()
+    else:
+        name = f"Course {facility_id}"
+
+    # Try page title as fallback/override if it looks better
     try:
         resp = requests.get(url, headers=HEADERS, timeout=15)
         m = re.search(r'<title>([^<]+)</title>', resp.text, re.IGNORECASE)
         if m:
             raw_name = m.group(1).strip()
-            name = re.sub(r'\s*[-|–]\s*(GolfNow|TeeItUp|Tee Times|Book).*', '', raw_name, flags=re.IGNORECASE).strip()
-            if not name:
-                name = f"Course {facility_id}"
+            # Strip trailing platform names
+            cleaned = re.sub(r"\s*[-|–|:]\s*(GolfNow|TeeItUp|Tee Times|Book|Golf).*$", "", raw_name, flags=re.IGNORECASE).strip()
+            # Only use page title if it's meaningfully longer than generic
+            if cleaned and cleaned.lower() not in ("tee times", "book", "golf", "") and len(cleaned) > 5:
+                name = cleaned
     except Exception as e:
         logger.warning(f"Could not fetch GolfNow page for name: {e}")
 

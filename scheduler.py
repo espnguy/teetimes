@@ -116,14 +116,15 @@ class TeeTimeScheduler:
         cfg = db.load_config()
         email    = cfg.get("email")
         password = cfg.get("password")
+        platform = job.get("platform", "foreup")
 
-        if not email or not password:
-            self._log(job_id, "⚠️ No credentials configured — skipping poll. Go to Settings.")
+        # Only ForeUp jobs need credentials
+        if platform not in ("teeitup", "golfnow") and (not email or not password):
+            self._log(job_id, "⚠️ No ForeUp credentials configured — skipping poll. Go to Settings.")
             return
 
         try:
             # Use the right client based on platform
-            platform = job.get("platform", "foreup")
             if platform in ("teeitup", "golfnow"):
                 from golfnow_client import GolfNowClient
                 client = GolfNowClient()

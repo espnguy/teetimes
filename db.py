@@ -167,21 +167,23 @@ def save_course(course_id: str, info: dict):
         with get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
-                    INSERT INTO courses (course_id, schedule_id, booking_class, name, url)
-                    VALUES (%s, %s, %s, %s, %s)
+                    INSERT INTO courses (course_id, schedule_id, booking_class, name, url, platform)
+                    VALUES (%s, %s, %s, %s, %s, %s)
                     ON CONFLICT (course_id) DO UPDATE SET
                         schedule_id   = EXCLUDED.schedule_id,
                         booking_class = EXCLUDED.booking_class,
                         name          = EXCLUDED.name,
-                        url           = EXCLUDED.url
+                        url           = EXCLUDED.url,
+                        platform      = EXCLUDED.platform
                 """, (
                     course_id,
                     info["schedule_id"],
                     info["booking_class"],
                     info["name"],
                     info["url"],
+                    info.get("platform", "foreup"),
                 ))
-        logger.info(f"Saved course {course_id}: {info['name']}")
+        logger.info(f"Saved course {course_id}: {info['name']} (platform={info.get('platform','foreup')})")
     except Exception as e:
         logger.error(f"Could not save course: {e}")
 

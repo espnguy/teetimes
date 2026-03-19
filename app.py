@@ -107,7 +107,14 @@ def add_job():
         data["schedule_id"]   = course["schedule_id"]
         data["booking_class"] = course["booking_class"]
         data["course_name"]   = course["name"]
-        data["platform"]      = course.get("platform", "foreup")
+        # Detect platform from URL if not stored on the course
+        stored_platform = course.get("platform")
+        if not stored_platform or stored_platform == "foreup":
+            from course_resolver import detect_platform
+            detected = detect_platform(data["course_url"])
+            data["platform"] = detected if detected != "unknown" else "foreup"
+        else:
+            data["platform"] = stored_platform
         job_id = scheduler.add_job(data)
         return jsonify({"success": True, "job_id": job_id, "course": course})
     except Exception as e:

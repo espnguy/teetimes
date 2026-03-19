@@ -187,24 +187,68 @@ class GolfNowClient:
     def _fetch_golfnow(self, facility_id: str, date: str, players: int, holes: int) -> list[dict]:
         """
         Fetch from GolfNow.
-        Confirmed endpoint from DevTools:
-          GET https://www.golfnow.com/api/tee-times/tee-time-search-results
-               ?date=YYYY-MM-DD&facilityIds=12345&returnPromotedRates=true
+        Confirmed endpoint + payload from DevTools:
+          POST https://www.golfnow.com/api/tee-times/tee-time-search-results
+          Body: JSON with facilityId, date (formatted "Mar 21 2026"), players, timeMin/timeMax, etc.
+        timeMin/timeMax are in 30-min increments from midnight (10=5am, 42=9pm).
         """
         url = "https://www.golfnow.com/api/tee-times/tee-time-search-results"
-        params = {
-            "date":                date,
-            "facilityIds":         facility_id,
-            "returnPromotedRates": "true",
+
+        # Convert YYYY-MM-DD to "Mar 21 2026" format GolfNow expects
+        from datetime import datetime as _dt
+        try:
+            d = _dt.strptime(date, "%Y-%m-%d")
+            gn_date = d.strftime("%b %-d %Y")  # e.g. "Mar 20 2026"
+        except Exception:
+            gn_date = date
+
+        payload = {
+            "address":                  None,
+            "bestDealsOnly":            False,
+            "currentClientDate":        _dt.utcnow().strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+            "customerToken":            None,
+            "date":                     gn_date,
+            "daysToSearch":             None,
+            "excludeFeaturedFacilities": True,
+            "excludePrivateFacilities": False,
+            "facilityGroupId":          None,
+            "facilityId":               int(facility_id) if facility_id.isdigit() else facility_id,
+            "facilityIds":              [],
+            "facilityType":             "Any",
+            "golfPassPerksOnly":        False,
+            "holes":                    "Any",
+            "hotDealsOnly":             False,
+            "latitude":                 None,
+            "longitude":                None,
+            "pageNumber":               0,
+            "pageSize":                 30,
+            "players":                  0,  # 0 = any
+            "priceMax":                 10000,
+            "priceMin":                 0,
+            "rateType":                 "all",
+            "searchType":               "Facility",
+            "sortBy":                   "Date",
+            "sortByRollup":             "Date.MinDate",
+            "sortDirection":            0,
+            "teeTimeCount":             15,
+            "timeMax":                  42,  # 9pm
+            "timeMin":                  10,  # 5am
+            "timePeriod":               "Any",
+            "trackmanOnly":             False,
+            "useWidgetNextAvailableDays": None,
+            "view":                     "Grouping",
         }
+
         headers = {
             **HEADERS,
-            "Accept":   "application/json",
-            "Origin":   "https://www.golfnow.com",
-            "Referer":  f"https://www.golfnow.com/tee-times/facility/{facility_id}",
+            "Accept":       "application/json",
+            "Content-Type": "application/json",
+            "Origin":       "https://www.golfnow.com",
+            "Referer":      f"https://www.golfnow.com/tee-times/facility/{facility_id}/search",
         }
-        resp = self.session.get(url, params=params, headers=headers, timeout=15)
-        logger.info(f"GolfNow response: {resp.status_code} — {resp.text[:300]}")
+
+        resp = self.session.post(url, json=payload, headers=headers, timeout=15)
+        logger.info(f"GolfNow response: {resp.status_code} — {resp.text[:400]}")
         resp.raise_for_status()
         if not resp.text.strip():
             raise ValueError(f"GolfNow returned empty response (status {resp.status_code})")

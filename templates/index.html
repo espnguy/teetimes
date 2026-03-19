@@ -148,20 +148,20 @@
       <div style="background:#dcfce7;border:1px solid #86efac;border-radius:8px;padding:10px 14px;
                   margin-bottom:16px;font-size:.85rem;color:#15803d;display:flex;align-items:center;gap:8px">
         🔒 <strong>Credentials loaded from Railway environment variables</strong> — they persist through restarts and redeploys.
-        To change them, update <code>FOREUP_EMAIL</code> and <code>FOREUP_PASSWORD</code> in your Railway dashboard.
+        To change them, update <code>FOREUP_EMAIL</code> and <code>FOREUP_PASSWORD</code> in your Railway dashboard. Only required for ForeUp courses.
       </div>
       {% endif %}
       <form action="/config" method="POST">
         <div class="form-row-2">
           <div class="form-row">
-            <label>ForeUp Email</label>
+            <label>ForeUp Email <span style="font-weight:400;color:var(--gray);font-size:.8rem">(ForeUp courses only)</span></label>
             <input name="email" type="email"
               value="{{ config.email }}"
               placeholder="you@email.com"
               {% if env_creds %}style="background:#f0fdf4;color:#166534" title="Set via FOREUP_EMAIL env var"{% endif %}>
           </div>
           <div class="form-row">
-            <label>ForeUp Password</label>
+            <label>ForeUp Password <span style="font-weight:400;color:var(--gray);font-size:.8rem">(ForeUp courses only)</span></label>
             <input name="password" type="password"
               value=""
               placeholder="{% if env_creds %}Saved via env var — leave blank to keep{% else %}••••••••{% endif %}"
@@ -307,12 +307,11 @@
         <li>Set your <strong>target date and preferred time window</strong></li>
         <li>Click <strong>"Start Watching"</strong> — the server polls every 2 min</li>
         <li>When a tee time appears, the job turns <span style="color:#15803d;font-weight:700">green</span></li>
-        <li>Tap the <strong>Pushover notification</strong> or click <strong>"Book on ForeUp"</strong> to open the booking page</li>
+        <li>Tap the <strong>Pushover notification</strong> or click <strong>"Book on [Platform]"</strong> to open the booking page</li>
       </ol>
       <div class="divider"></div>
       <div style="font-size:.82rem;color:var(--gray)">
-        <strong>Tip:</strong> ForeUp releases tee times exactly 7 days in advance at midnight.
-        Start a job the day before to be ready the moment they drop!
+        <strong>Tip:</strong> Most courses release tee times 7–14 days in advance. Check your course's booking rules. Start a job the evening before to be ready the moment they drop!
       </div>
     </div>
   </div>
@@ -707,10 +706,11 @@ function renderJob(job) {
           </div>` : ''}
       </div>
       <div class="job-actions">
-        ${job.status === 'available' ? `
-          <a class="btn btn-confirm btn-sm" href="https://foreupsoftware.com/index.php/booking/${job.course_id}#/teetimes" target="_blank">
-            🏌️ Book on ForeUp →
-          </a>` : ''}
+        ${job.status === 'available' ?
+          (job.platform === 'teeitup' || job.platform === 'golfnow'
+            ? `<a class="btn btn-confirm btn-sm" href="https://book.teeitup.golf/tee-times?facilityId=${job.course_id}" target="_blank">🏌️ Book on GolfNow →</a>`
+            : `<a class="btn btn-confirm btn-sm" href="https://foreupsoftware.com/index.php/booking/${job.course_id}#/teetimes" target="_blank">🏌️ Book on ForeUp →</a>`)
+          : ''}
         <button class="btn btn-outline btn-sm" onclick="toggleLog('${job.id}')">Logs</button>
         <button class="btn btn-danger btn-sm" onclick="removeJob('${job.id}')">✕</button>
       </div>

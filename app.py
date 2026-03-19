@@ -70,16 +70,17 @@ def get_courses():
 def update_course(course_id):
     """Manually save or update a course (for when auto-detect fails)."""
     data = request.json
-    required = ["schedule_id", "booking_class", "name"]
-    for f in required:
-        if not data.get(f):
-            return jsonify({"error": f"Missing: {f}"}), 400
+    if not data.get("name"):
+        return jsonify({"error": "Missing: name"}), 400
+    platform = data.get("platform", "foreup")
     info = {
-        "course_id": course_id,
-        "schedule_id": data["schedule_id"],
-        "booking_class": data["booking_class"],
-        "name": data["name"],
-        "url": data.get("url", f"https://foreupsoftware.com/index.php/booking/{course_id}"),
+        "course_id":     course_id,
+        "schedule_id":   data.get("schedule_id", course_id),
+        "booking_class": data.get("booking_class", course_id),
+        "name":          data["name"],
+        "url":           data.get("url", ""),
+        "platform":      platform,
+        "be_alias":      data.get("be_alias", ""),
     }
     db.save_course(course_id, info)
     return jsonify({"success": True, "course": info})

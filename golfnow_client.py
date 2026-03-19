@@ -185,17 +185,29 @@ class GolfNowClient:
         return slots
 
     def _fetch_golfnow(self, facility_id: str, date: str, players: int, holes: int) -> list[dict]:
-        """Fetch from GolfNow API."""
-        url = f"{GOLFNOW_API}/tee-times/search"
+        """
+        Fetch from GolfNow.
+        Confirmed endpoint from DevTools:
+          GET https://www.golfnow.com/api/tee-times/tee-time-search-results
+               ?date=YYYY-MM-DD&facilityIds=12345&returnPromotedRates=true
+        """
+        url = "https://www.golfnow.com/api/tee-times/tee-time-search-results"
         params = {
-            "facilityId": facility_id,
-            "date":        date,
-            "players":     players,
-            "holes":       holes,
-            "isHotDeal":   "false",
+            "date":                date,
+            "facilityIds":         facility_id,
+            "returnPromotedRates": "true",
         }
-        resp = self.session.get(url, params=params, timeout=15)
+        headers = {
+            **HEADERS,
+            "Accept":   "application/json",
+            "Origin":   "https://www.golfnow.com",
+            "Referer":  f"https://www.golfnow.com/tee-times/facility/{facility_id}",
+        }
+        resp = self.session.get(url, params=params, headers=headers, timeout=15)
+        logger.info(f"GolfNow response: {resp.status_code} — {resp.text[:300]}")
         resp.raise_for_status()
+        if not resp.text.strip():
+            raise ValueError(f"GolfNow returned empty response (status {resp.status_code})")
         data = resp.json()
         return self._normalize_golfnow(data)
 

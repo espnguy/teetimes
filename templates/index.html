@@ -243,21 +243,27 @@
       <div id="manualOverride" style="display:none;background:#fffbeb;border:1px solid #fcd34d;
            border-radius:8px;padding:12px;margin-bottom:14px">
         <div style="font-size:.82rem;font-weight:600;color:#92400e;margin-bottom:8px">
-          ⚠️ Could not auto-detect IDs. For ForeUp: check DevTools → Network. For GolfNow/TeeItUp: look for facilityId in the URL.
+          ⚠️ Could not auto-detect IDs. Fill in the details below manually.
         </div>
-        <div class="form-row-2">
-          <div>
-            <label>Schedule ID</label>
-            <input id="manualScheduleId" type="text" placeholder="e.g. 1832">
-          </div>
-          <div>
-            <label>Booking Class</label>
-            <input id="manualBookingClass" type="text" placeholder="e.g. 12800">
+        <div id="manualForeUpFields">
+          <div class="form-row-2">
+            <div>
+              <label>Schedule ID <span style="font-weight:400;color:var(--gray);font-size:.75rem">(ForeUp only)</span></label>
+              <input id="manualScheduleId" type="text" placeholder="e.g. 1832">
+            </div>
+            <div>
+              <label>Booking Class <span style="font-weight:400;color:var(--gray);font-size:.75rem">(ForeUp only)</span></label>
+              <input id="manualBookingClass" type="text" placeholder="e.g. 12800">
+            </div>
           </div>
         </div>
         <div class="form-row">
+          <label>Kenna ObjectId <span style="font-weight:400;color:var(--gray);font-size:.75rem">(TeeItUp only — 24-char hex from DevTools URL path)</span></label>
+          <input id="manualKennaId" type="text" placeholder="e.g. 54f14bc60c8ad60378b0165b" style="font-family:monospace">
+        </div>
+        <div class="form-row">
           <label>Course Name</label>
-          <input id="manualCourseName" type="text" placeholder="e.g. Stonebridge Ranch">
+          <input id="manualCourseName" type="text" placeholder="e.g. Pecan Hollow Golf Course">
         </div>
         <button type="button" class="btn btn-outline btn-sm" onclick="saveManualCourse()">💾 Save This Course</button>
       </div>
@@ -558,23 +564,43 @@ async function saveManualCourse() {
   const url = document.getElementById('courseUrl').value.trim();
   const scheduleId = document.getElementById('manualScheduleId').value.trim();
   const bookingClass = document.getElementById('manualBookingClass').value.trim();
+  const kennaId = document.getElementById('manualKennaId').value.trim();
   const name = document.getElementById('manualCourseName').value.trim();
-  if (!scheduleId || !name) { toast('Schedule ID and name are required', 'error'); return; }
+  if (!name) { toast('Course name is required', 'error'); return; }
 
-  // Extract course_id from URL
-  const match = url.match(/booking\/(\d+)/);
-  if (!match) { toast('Could not extract course ID from URL', 'error'); return; }
-  const courseId = match[1];
+  // Determine platform and course_id
+  let courseId, platform, beAlias = '';
+  if (kennaId) {
+    // TeeItUp/Kenna — use the ObjectId
+    courseId = kennaId;
+    platform = 'teeitup';
+    // Extract be_alias from subdomain if possible
+    const aliasMatch = url.match(/https?:\/\/([\w-]+)\.book\.teeitup/);
+    if (aliasMatch) beAlias = aliasMatch[1];
+  } else if (scheduleId) {
+    // ForeUp — use schedule_id
+    const match = url.match(/booking\/(\d+)/);
+    if (!match) { toast('Could not extract course ID from ForeUp URL', 'error'); return; }
+    courseId = match[1];
+    platform = 'foreup';
+  } else {
+    toast('Enter either a Schedule ID (ForeUp) or Kenna ObjectId (TeeItUp)', 'error');
+    return;
+  }
 
   const res = await fetch(`/api/courses/${courseId}`, {
     method: 'PUT', headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({ schedule_id: scheduleId, booking_class: bookingClass || scheduleId, name, url })
+    body: JSON.stringify({
+      schedule_id: scheduleId || courseId,
+      booking_class: bookingClass || scheduleId || courseId,
+      name, url, platform, be_alias: beAlias
+    })
   });
   const data = await res.json();
   if (data.success) {
     resolvedCourse = data.course;
     const info = document.getElementById('courseInfo');
-    info.textContent = `✅ ${name} saved · Schedule: ${scheduleId} · Class: ${bookingClass}`;
+    info.textContent = `✅ ${name} saved (${platform})`;
     info.style.color = 'var(--green)';
     document.getElementById('manualOverride').style.display = 'none';
     loadSavedCourses();

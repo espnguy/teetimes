@@ -272,21 +272,23 @@ def delete_job(job_id: str):
 
 
 def append_job_log(job_id: str, entry: str, max_logs: int = 100):
-    """Append a log entry, keeping only the last max_logs entries."""
+    """Append a log entry, keeping only the most recent max_logs entries."""
     try:
         with get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
                     UPDATE jobs
                     SET logs = (
-                        SELECT jsonb_agg(e)
+                        SELECT jsonb_agg(e ORDER BY rn DESC)
                         FROM (
-                            SELECT e FROM jsonb_array_elements(logs) AS e
-                            UNION ALL
-                            SELECT %s::jsonb
-                            ORDER BY 1
-                            LIMIT %s
-                        ) sub(e)
+                            SELECT e, row_number() OVER () AS rn
+                            FROM (
+                                SELECT e FROM jsonb_array_elements(logs) AS e
+                                UNION ALL
+                                SELECT %s::jsonb
+                            ) all_entries(e)
+                        ) numbered
+                        WHERE rn <= %s
                     )
                     WHERE id = %s
                 """, (json.dumps(entry), max_logs, job_id))

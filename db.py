@@ -279,16 +279,20 @@ def append_job_log(job_id: str, entry: str, max_logs: int = 100):
                 cur.execute("""
                     UPDATE jobs
                     SET logs = (
-                        SELECT jsonb_agg(e ORDER BY rn DESC)
+                        SELECT jsonb_agg(e)
                         FROM (
-                            SELECT e, row_number() OVER () AS rn
+                            SELECT e
                             FROM (
-                                SELECT e FROM jsonb_array_elements(logs) AS e
-                                UNION ALL
-                                SELECT %s::jsonb
-                            ) all_entries(e)
-                        ) numbered
-                        WHERE rn <= %s
+                                SELECT e, row_number() OVER () AS rn
+                                FROM (
+                                    SELECT e FROM jsonb_array_elements(logs) AS e
+                                    UNION ALL
+                                    SELECT %s::jsonb
+                                ) all_entries(e)
+                            ) numbered
+                            ORDER BY rn DESC
+                            LIMIT %s
+                        ) recent(e)
                     )
                     WHERE id = %s
                 """, (json.dumps(entry), max_logs, job_id))

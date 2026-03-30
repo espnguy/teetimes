@@ -129,15 +129,26 @@ class GolfNowClient:
         else:
             all_times = self._fetch_golfnow(course_id, api_date, players, holes)
 
-        # Filter by time window
+        # Filter by time window and player count
         from_min = _time_to_minutes(time_from)
         to_min   = _time_to_minutes(time_to)
 
         filtered = []
         for slot in all_times:
             slot_min = _parse_slot_time(slot.get("time", ""))
-            if slot_min is not None and from_min <= slot_min <= to_min:
-                filtered.append(slot)
+            if slot_min is None or not (from_min <= slot_min <= to_min):
+                continue
+            # Filter by player count — check if requested count is in allowed group sizes
+            player_rule = slot.get("rate_type", "")  # e.g. "TwoFour", "Two", "TwoThreeFour"
+            if player_rule:
+                allowed = set()
+                if "One" in player_rule:   allowed.add(1)
+                if "Two" in player_rule:   allowed.add(2)
+                if "Three" in player_rule: allowed.add(3)
+                if "Four" in player_rule:  allowed.add(4)
+                if allowed and players not in allowed:
+                    continue
+            filtered.append(slot)
 
         logger.info(
             f"GolfNow: fetched {len(all_times)} times for facility {course_id} "
@@ -378,9 +389,17 @@ class GolfNowClient:
             except Exception:
                 pass
 
-            # playerRule tells us group sizes allowed e.g. "TwoFour"
+            # playerRule tells us max group size e.g. "TwoFour" = 2 or 4 players allowed
+            # Use the max allowed as available_spots (conservative — actual may be less)
             player_rule = rate.get("playerRule", "")
-            spots = 4 if "Four" in player_rule else 2
+            if "Four" in player_rule:
+                spots = 4
+            elif "Three" in player_rule:
+                spots = 3
+            elif "Two" in player_rule:
+                spots = 2
+            else:
+                spots = 4  # default
 
             slots.append({
                 "time":            time_str,

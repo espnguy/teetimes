@@ -27,11 +27,16 @@ HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/143.0.0.0 Safari/537.36"
+        "Chrome/124.0.0.0 Safari/537.36"
     ),
-    "Accept": "application/json, text/plain, */*",
-    "Origin": "https://www.golfnow.com",
-    "Referer": "https://www.golfnow.com/",
+    "Accept":          "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Origin":          "https://www.golfnow.com",
+    "Referer":         "https://www.golfnow.com/",
+    "Sec-Ch-Ua":          '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+    "Sec-Ch-Ua-Mobile":   "?0",
+    "Sec-Ch-Ua-Platform": '"Windows"',
 }
 
 
@@ -99,6 +104,7 @@ class GolfNowClient:
     def __init__(self):
         self.session = requests.Session()
         self.session.headers.update(HEADERS)
+        self._golfnow_session_ready = False
 
     def fetch_tee_times(
         self,
@@ -195,6 +201,27 @@ class GolfNowClient:
         logger.info(f"TeeItUp/Kenna: got {len(slots)} slots from {url}")
         return slots
 
+    def _ensure_golfnow_session(self, facility_id: str):
+        """GET the facility page first to obtain GolfNow session cookies."""
+        if self._golfnow_session_ready:
+            return
+        try:
+            self.session.get(
+                f"https://www.golfnow.com/tee-times/facility/{facility_id}",
+                headers={
+                    "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "Accept-Language": "en-US,en;q=0.9",
+                    "Sec-Fetch-Dest":  "document",
+                    "Sec-Fetch-Mode":  "navigate",
+                    "Sec-Fetch-Site":  "none",
+                },
+                timeout=15,
+            )
+            logger.info(f"GolfNow session initialized for facility {facility_id}")
+        except Exception as e:
+            logger.warning(f"GolfNow session init failed (continuing anyway): {e}")
+        self._golfnow_session_ready = True
+
     def _fetch_golfnow(self, facility_id: str, date: str, players: int, holes: int) -> list[dict]:
         """
         Fetch from GolfNow.
@@ -203,6 +230,8 @@ class GolfNowClient:
           Body: JSON with facilityId, date (formatted "Mar 21 2026"), players, timeMin/timeMax, etc.
         timeMin/timeMax are in 30-min increments from midnight (10=5am, 42=9pm).
         """
+        self._ensure_golfnow_session(facility_id)
+
         url = "https://www.golfnow.com/api/tee-times/tee-time-search-results"
 
         # Convert YYYY-MM-DD to "Mar 21 2026" format GolfNow expects
@@ -252,10 +281,13 @@ class GolfNowClient:
 
         headers = {
             **HEADERS,
-            "Accept":       "application/json",
-            "Content-Type": "application/json",
-            "Origin":       "https://www.golfnow.com",
-            "Referer":      f"https://www.golfnow.com/tee-times/facility/{facility_id}/search",
+            "Accept":          "application/json, text/plain, */*",
+            "Content-Type":    "application/json",
+            "Origin":          "https://www.golfnow.com",
+            "Referer":         f"https://www.golfnow.com/tee-times/facility/{facility_id}/search",
+            "Sec-Fetch-Dest":  "empty",
+            "Sec-Fetch-Mode":  "cors",
+            "Sec-Fetch-Site":  "same-origin",
         }
 
         resp = self.session.post(url, json=payload, headers=headers, timeout=15)

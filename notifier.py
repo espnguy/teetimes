@@ -49,6 +49,11 @@ def send_pushover(
     if url:
         payload["url"] = url
         payload["url_title"] = url_title or "Open Dashboard"
+    if priority == 2:
+        # Emergency priority is rejected unless retry/expire are supplied.
+        # Nag every 30s for 5 minutes — about as long as a ForeUp hold lasts.
+        payload["retry"] = 30
+        payload["expire"] = 300
 
     try:
         resp = requests.post(PUSHOVER_API, data=payload, timeout=10)
@@ -71,8 +76,15 @@ def notify_times_available(
     job: dict,
     times: list,
     dashboard_url: str = "",
+    held: bool = False,
 ) -> bool:
-    """Send a tee time alert with a direct link to the ForeUp booking page."""
+    """
+    Send a tee time alert with a direct link to the booking page.
+
+    `held` means a pending reservation was placed on the earliest slot — the
+    round is not booked, but it is reserved for a few minutes pending checkout,
+    so the message needs to convey urgency.
+    """
     date      = job.get("target_date", "?")
     time_from = job.get("time_from", "?")
     time_to   = job.get("time_to", "?")
@@ -95,17 +107,23 @@ def notify_times_available(
     try:
         from datetime import datetime as dt
         d = dt.strptime(date, "%m-%d-%Y")
-        pretty_date = d.strftime("%a %b %-d")
+        pretty_date = f"{d.strftime('%a %b')} {d.day}"
     except Exception:
         pretty_date = date
 
-    title = f"⛳ {count} Tee Time{'s' if count > 1 else ''} — {pretty_date}"
+    if held:
+        title = f"🔒 HELD {_fmt_time(times[0].get('time'))} — {pretty_date}"
+        footer = "⚠️ On hold for a few minutes only — tap to confirm NOW."
+    else:
+        title = f"⛳ {count} Tee Time{'s' if count > 1 else ''} — {pretty_date}"
+        footer = f"Open the booking page → {pretty_date}"
+
     message = (
         f"{pretty_date} • {players} players\n"
         f"──────────────\n"
         f"{preview_str}\n"
         f"──────────────\n"
-        f"ForeUp → select Public → {pretty_date}"
+        f"{footer}"
     )
 
     # Link goes straight to the booking page — platform-aware
@@ -114,7 +132,8 @@ def notify_times_available(
         from golfnow_client import GolfNowClient
         booking_url = GolfNowClient.booking_url(course_id, date, int(players), platform)
     else:
-            booking_url = ForeUpClient.booking_url(course_id, date, int(players))
+        from foreup_client import ForeUpClient
+        booking_url = ForeUpClient.booking_url(course_id, date, int(players))
 
     return send_pushover(
         user_token=user_token,
@@ -122,8 +141,8 @@ def notify_times_available(
         title=title,
         message=message,
         url=booking_url,
-        url_title="Open ForeUp →",
-        priority=1,
+        url_title="Confirm hold →" if held else "Open booking page →",
+        priority=2 if held else 1,
     )
 
 
@@ -147,7 +166,8 @@ def _fmt_time(raw) -> str:
     raw = str(raw).strip()
     if re.match(r"^\d{10,}$", raw):
         try:
-            return datetime.fromtimestamp(int(raw)).strftime("%-I:%M %p")
+            d = datetime.fromtimestamp(int(raw))
+            return f"{d.hour % 12 or 12}:{d.strftime('%M %p')}"
         except Exception:
             pass
     m = re.match(r"^(\d{1,2}):(\d{2})", raw)

@@ -11,6 +11,7 @@ Resolved courses are saved to courses.json so users only set up each course once
 """
 
 import re
+import json
 import logging
 import requests
 import db
@@ -136,18 +137,25 @@ def resolve_course_from_url(url: str) -> dict:
         r'data-schedule[_-]id=["\'](\d+)',
     ])
 
-    booking_class = _extract_id(html, [
-        r'"booking_class"\s*[=:]\s*["\']?(\d+)',
-        r'bookingClass\s*[=:]\s*["\']?(\d+)',
-        r'booking_class\s*=\s*["\']?(\d+)',
-        r'data-booking[_-]class=["\'](\d+)',
-    ])
+    # ForeUp embeds the real booking classes as a JSON array in the page. The old
+    # regexes never matched it, so booking_class silently fell back to schedule_id
+    # — which ForeUp rejects with a bare `false`.
+    booking_classes = _extract_booking_classes(html)
+
+    # A booking class carries the tee sheet it belongs to; that beats the regex.
+    if booking_classes and booking_classes[0].get("teesheet_id"):
+        schedule_id = booking_classes[0]["teesheet_id"]
+
+    booking_class = _pick_booking_class(course_id, schedule_id, booking_classes)
 
     # Try to get the course name from the page title
     name_match = re.search(r'<title>([^<]+)</title>', html, re.IGNORECASE)
     name = name_match.group(1).strip() if name_match else f"Course {course_id}"
-    # Clean up common suffixes
-    name = re.sub(r'\s*[-|–]\s*(ForeUp|Tee Times|Book).*', '', name, flags=re.IGNORECASE).strip()
+    # Clean up common title suffixes — "Grapevine Golf Course - Online Booking"
+    # should store as "Grapevine Golf Course" so it matches elsewhere.
+    name = re.sub(
+        r'\s*[-|–:]\s*(Online\s+Booking|Book\s+a\s+Tee\s+Time|ForeUp|Tee\s*Times?|Booking|Book).*$',
+        '', name, flags=re.IGNORECASE).strip()
     if not name:
         name = f"Course {course_id}"
 
@@ -158,10 +166,12 @@ def resolve_course_from_url(url: str) -> dict:
             f"click a date, and paste the tee times request URL instead."
         )
 
-    # booking_class often equals schedule_id if not found separately
     if not booking_class:
-        booking_class = schedule_id
-        logger.warning(f"Could not find booking_class, defaulting to schedule_id={schedule_id}")
+        raise RuntimeError(
+            f"Found schedule_id={schedule_id} but no usable booking_class for course "
+            f"{course_id}. Open the booking page, pick your player category, and "
+            f"enter the booking_class manually."
+        )
 
     result = {
         "course_id": course_id,
@@ -169,11 +179,108 @@ def resolve_course_from_url(url: str) -> dict:
         "booking_class": booking_class,
         "name": name,
         "url": booking_url,
+        "platform": "foreup",
+        "booking_classes": booking_classes,
+        "online_open_time": _open_time_for(booking_classes, booking_class),
+        "timezone": _extract_timezone(html),
     }
 
     save_course(course_id, result)
     logger.info(f"Auto-detected and saved course {course_id}: {result}")
     return result
+
+
+# Booking platform fingerprints, most specific first. Order matters: a ForeUp
+# booking link beats a stray GolfNow marketing asset on the same page.
+PLATFORM_PATTERNS = (
+    ("foreup",     r'foreupsoftware\.com/index\.php/booking/\d+'),
+    ("teeitup",    r'[\w-]+\.book\.teeitup\.(?:golf|com)[^\s"\'<>]*'),
+    ("teeitup",    r'book\.teeitup\.(?:golf|com)[^\s"\'<>]*'),
+    ("golfnow",    r'golfnow\.com/tee-times/facility/\d+[^\s"\'<>]*'),
+    # Recognised but not supported yet — naming them beats a bare "unknown".
+    ("chronogolf", r'chronogolf\.com/(?:widgets?|club)/[\w/-]+'),
+    ("chronogolf", r'chronogolfSettings|chronogolf-js'),
+    ("teesnap",    r'[\w-]+\.teesnap\.net[^\s"\'<>]*'),
+    ("quick18",    r'[\w-]+\.quick18\.com[^\s"\'<>]*'),
+)
+
+# Course sites usually link booking from a subpage rather than the homepage.
+_BOOKING_LINK_RE = re.compile(
+    r'href=["\']([^"\']{3,120})["\']', re.IGNORECASE)
+_BOOKING_WORDS = ("tee-time", "tee_time", "teetime", "tee-times", "book", "reserv")
+
+
+def _match_platform(html: str) -> dict | None:
+    for platform, pattern in PLATFORM_PATTERNS:
+        m = re.search(pattern, html, re.IGNORECASE)
+        if not m:
+            continue
+        found = m.group(0)
+        if found.startswith("http"):
+            booking_url = found
+        elif "." in found:               # a bare domain like foo.book.teeitup.com
+            booking_url = f"https://{found}"
+        else:                            # a JS marker, no usable URL
+            booking_url = ""
+        return {"platform": platform, "booking_url": booking_url}
+    return None
+
+
+def sniff_platform(url: str, timeout: int = 10, follow_links: int = 2) -> dict:
+    """
+    Identify which booking platform a course website uses, without touching the
+    database or resolving IDs.
+
+    Checks the landing page, then follows up to `follow_links` booking-looking
+    links, since most course sites keep the widget on a /tee-times page.
+
+    Returns {platform, booking_url}; platform is "unknown" if nothing matches.
+    """
+    direct = detect_platform(url)
+    if direct != "unknown":
+        return {"platform": direct, "booking_url": url}
+
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=timeout)
+        html = resp.text
+        base = resp.url
+    except Exception as e:
+        logger.debug(f"sniff_platform could not fetch {url}: {e}")
+        return {"platform": "unknown", "booking_url": ""}
+
+    hit = _match_platform(html)
+    if hit:
+        return hit
+
+    # Nothing on the landing page — try the pages a golfer would click.
+    from urllib.parse import urljoin, urlparse
+    origin = urlparse(base).netloc
+    candidates, seen = [], set()
+    for href in _BOOKING_LINK_RE.findall(html):
+        low = href.lower()
+        if not any(w in low for w in _BOOKING_WORDS):
+            continue
+        full = urljoin(base, href)
+        # Stay on the course's own site; off-site links are handled by the
+        # pattern match above.
+        if urlparse(full).netloc != origin or full in seen:
+            continue
+        seen.add(full)
+        candidates.append(full)
+        if len(candidates) >= follow_links:
+            break
+
+    for link in candidates:
+        try:
+            sub = requests.get(link, headers=HEADERS, timeout=timeout)
+            hit = _match_platform(sub.text)
+            if hit:
+                logger.info(f"Found {hit['platform']} for {url} via {link}")
+                return hit
+        except Exception as e:
+            logger.debug(f"Could not fetch booking subpage {link}: {e}")
+
+    return {"platform": "unknown", "booking_url": ""}
 
 
 def _detect_from_page(url: str) -> dict:
@@ -310,6 +417,128 @@ def _resolve_golfnow(url: str, platform: str) -> dict:
     db.save_course(kenna_id, result)
     logger.info(f"Saved GolfNow course {kenna_id}: {name} (alias={be_alias})")
     return result
+
+
+def _extract_booking_classes(html: str) -> list[dict]:
+    """
+    Pull the `booking_classes` array out of the JSON blob ForeUp embeds in the
+    booking page. Returns the bookable ones (active, not hidden), each with
+    booking_class_id / teesheet_id / name / block_online_booking.
+    """
+    marker = '"booking_classes":'
+    idx = html.find(marker)
+    if idx == -1:
+        return []
+
+    start = html.find("[", idx)
+    if start == -1:
+        return []
+
+    # Bracket-match to find the end of the array — it contains nested objects.
+    depth, end = 0, -1
+    for i in range(start, len(html)):
+        c = html[i]
+        if c == "[":
+            depth += 1
+        elif c == "]":
+            depth -= 1
+            if depth == 0:
+                end = i + 1
+                break
+    if end == -1:
+        return []
+
+    raw = html[start:end].replace("\\/", "/")
+    try:
+        classes = json.loads(raw)
+    except Exception as e:
+        logger.warning(f"Could not parse booking_classes JSON: {e}")
+        return []
+
+    bookable = [
+        {
+            "booking_class_id":     str(c.get("booking_class_id", "")),
+            "teesheet_id":          str(c.get("teesheet_id", "")),
+            "name":                 c.get("name", ""),
+            "block_online_booking": str(c.get("block_online_booking", "0")) == "1",
+            "online_open_time":     c.get("online_open_time") or "",
+        }
+        for c in classes
+        if isinstance(c, dict)
+        and str(c.get("active", "1")) == "1"
+        and str(c.get("hidden", "0")) == "0"
+        and c.get("booking_class_id")
+    ]
+    logger.info(
+        "Found %d bookable booking class(es): %s",
+        len(bookable),
+        ", ".join(f"{c['name']}={c['booking_class_id']}" for c in bookable),
+    )
+    return bookable
+
+
+def _pick_booking_class(course_id: str, schedule_id: str, classes: list[dict]) -> str:
+    """
+    Choose the booking class that actually returns tee times.
+
+    Restricted classes (member/pass-holder) 401 without a matching login, so we
+    probe each candidate read-only with a real availability request and take the
+    first that returns a list. Public classes work unauthenticated.
+    """
+    if not classes:
+        return ""
+    if len(classes) == 1:
+        return classes[0]["booking_class_id"]
+
+    from foreup_client import probe_booking_class
+
+    # Prefer names that read as open-to-all, but verify rather than trust.
+    def openness(c: dict) -> int:
+        n = c["name"].lower()
+        if any(w in n for w in ("public", "guest", "non-member", "nonmember")):
+            return 0
+        return 1
+
+    for c in sorted(classes, key=openness):
+        try:
+            if probe_booking_class(course_id, schedule_id, c["booking_class_id"]):
+                logger.info(
+                    f"Booking class {c['booking_class_id']} ({c['name']}) is usable "
+                    f"without a login — using it."
+                )
+                return c["booking_class_id"]
+            logger.info(f"Booking class {c['booking_class_id']} ({c['name']}) is restricted.")
+        except Exception as e:
+            logger.warning(f"Probe failed for booking class {c['booking_class_id']}: {e}")
+
+    # Every class is restricted — fall back to the most open-sounding one and let
+    # the authenticated poll sort it out.
+    fallback = sorted(classes, key=openness)[0]["booking_class_id"]
+    logger.info(f"No class worked unauthenticated; defaulting to {fallback}.")
+    return fallback
+
+
+def _open_time_for(classes: list[dict], booking_class: str) -> str:
+    """The HHMM at which online booking opens for the chosen class, e.g. '0600'."""
+    for c in classes:
+        if c["booking_class_id"] == booking_class:
+            return c.get("online_open_time") or ""
+    return ""
+
+
+def _extract_timezone(html: str) -> str:
+    """
+    The course's IANA timezone, so a release time can be anchored correctly
+    regardless of what timezone the server runs in.
+    """
+    # The blob is JSON-escaped, so the value arrives as "America\/Chicago".
+    for pattern in (r'"timezone"\s*:\s*"([^"]+)"', r'"time_zone"\s*:\s*"([^"]+)"'):
+        m = re.search(pattern, html)
+        if m:
+            tz = m.group(1).replace("\\/", "/")
+            if "/" in tz:
+                return tz
+    return ""
 
 
 def _extract_id(html: str, patterns: list[str]) -> str:

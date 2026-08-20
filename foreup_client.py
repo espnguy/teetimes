@@ -96,9 +96,9 @@ def parse_course_url(url: str) -> dict:
 
 
 class ForeUpClient:
-    def __init__(self, email: str, password: str):
-        if not email or not password:
-            raise ValueError("Email and password are required. Configure them in Settings.")
+    def __init__(self, email: str = "", password: str = ""):
+        # Credentials are optional: public booking classes serve availability
+        # without a login. Only restricted (member/pass-holder) classes need one.
         self.email = email
         self.password = password
         self.session = requests.Session()
@@ -129,6 +129,8 @@ class ForeUpClient:
             logger.warning(f"Could not init session: {e}")
 
     def login(self, course_id: str = "19536"):
+        if not self.email or not self.password:
+            raise ValueError("Email and password are required. Configure them in Settings.")
         # Step 1 — get a session cookie by visiting the booking page
         self._init_session(course_id)
 
@@ -164,8 +166,14 @@ class ForeUpClient:
         return data
 
     def _ensure_logged_in(self, course_id: str = "19536"):
-        if not self._logged_in:
+        if self._logged_in:
+            return
+        if self.email and self.password:
             self.login(course_id)
+        else:
+            # Public mode — we still need a PHPSESSID or ForeUp answers
+            # "Refresh required" to the availability call.
+            self._init_session(course_id)
 
     # ── Tee Time Availability ─────────────────────────────────────────────────
 
@@ -197,9 +205,7 @@ class ForeUpClient:
         resp = self.session.get(url, params=params, timeout=15)
         _check_response(resp, "Fetch tee times")
 
-        all_times = resp.json()
-        if not isinstance(all_times, list):
-            raise ValueError(f"Unexpected tee times response: {all_times}")
+        all_times = _parse_times_response(resp, booking_class or course_id, schedule_id)
 
         # Log first slot so we can see the raw time format
         if all_times:
@@ -228,6 +234,65 @@ class ForeUpClient:
 
     # ── Booking ───────────────────────────────────────────────────────────────
 
+    def hold(self, slot: dict, players: int, holes: int = 18) -> dict:
+        """
+        Put a tee time on hold via ForeUp's pending_reservation endpoint.
+
+        This is the same call the booking page makes when you click a time: it
+        reserves the slot for a few minutes so you can complete checkout. It does
+        NOT finalize a booking — the round is not confirmed and nothing is
+        charged until a human completes checkout in the browser.
+
+        `slot` is a raw slot dict straight from fetch_tee_times, which already
+        carries every id the endpoint needs.
+
+        Returns the parsed response on success. Raises on refusal — notably when
+        the booking class has block_online_booking set, in which case the course
+        does not permit online booking for that player category at all.
+        """
+        self._ensure_logged_in(str(slot.get("course_id") or self._course_id))
+
+        payload = {
+            "time":              slot.get("time"),
+            "holes":             holes,
+            "players":           players,
+            "carts":             0,
+            "schedule_id":       slot.get("schedule_id"),
+            "teesheet_id":       slot.get("teesheet_id") or slot.get("schedule_id"),
+            "course_id":         slot.get("course_id"),
+            "booking_class_id":  slot.get("booking_class_id"),
+            "teesheet_side_id":  slot.get("teesheet_side_id"),
+            "duration":          1,
+            "pay_online":        slot.get("pay_online", "no"),
+        }
+        payload = {k: v for k, v in payload.items() if v is not None}
+
+        resp = self.session.post(
+            f"{BASE}/index.php/api/booking/pending_reservation",
+            json=payload,
+            timeout=15,
+        )
+
+        if resp.status_code in (401, 403):
+            raise PermissionError(
+                f"ForeUp refused the hold (HTTP {resp.status_code}). This booking "
+                f"class likely does not permit online booking. {resp.text[:200]}"
+            )
+        if not resp.ok:
+            raise RuntimeError(f"Hold failed: HTTP {resp.status_code} – {resp.text[:300]}")
+
+        try:
+            data = resp.json()
+        except ValueError:
+            raise RuntimeError(f"Hold returned non-JSON: {resp.text[:200]!r}")
+
+        if data is False or (isinstance(data, dict) and data.get("success") is False):
+            msg = data.get("msg") if isinstance(data, dict) else "returned `false`"
+            raise RuntimeError(f"ForeUp declined the hold: {msg}")
+
+        logger.info(f"Hold placed on {slot.get('time')}: {str(data)[:200]}")
+        return data if isinstance(data, dict) else {"response": data}
+
     @staticmethod
     def booking_url(course_id: str, date: str, players: int = 2) -> str:
         """
@@ -241,6 +306,72 @@ class ForeUpClient:
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _parse_times_response(resp: requests.Response, booking_class: str, schedule_id: str) -> list:
+    """
+    Turn a /api/booking/times response into a list of slots.
+
+    ForeUp answers a bad booking_class/schedule_id pairing with a bare `false`
+    (HTTP 200), which used to surface as an opaque "Poll error" every cycle.
+    Name that case explicitly so it is obvious in the job log.
+    """
+    try:
+        data = resp.json()
+    except ValueError:
+        raise RuntimeError(f"ForeUp returned non-JSON: {resp.text[:200]!r}")
+
+    if isinstance(data, list):
+        return data
+
+    if data is False:
+        raise ValueError(
+            f"ForeUp rejected booking_class={booking_class} / schedule_id={schedule_id} "
+            f"(returned `false`). These IDs are wrong for this course — re-resolve it "
+            f"so the correct booking class is detected."
+        )
+
+    if isinstance(data, dict):
+        msg = data.get("msg") or data.get("message") or str(data)[:200]
+        raise ValueError(f"ForeUp error: {msg}")
+
+    raise ValueError(f"Unexpected tee times response: {data!r}")
+
+
+def probe_booking_class(course_id: str, schedule_id: str, booking_class: str) -> bool:
+    """
+    Read-only check: is this booking class usable without a login?
+
+    Used during course resolution to tell a public class from a restricted one.
+    A restricted class answers 401; a wrong ID pairing answers `false`.
+
+    Probes a couple of dates because a single date can legitimately come back
+    empty (sheet not open yet, or the course bars that group size). Uses
+    players=2, which virtually every course allows — players=1 is often blocked
+    and would make a perfectly good class look dead.
+    """
+    from datetime import date, timedelta
+
+    client = ForeUpClient()
+    usable = False
+    for days_ahead in (3, 5):
+        try:
+            times = client.fetch_tee_times(
+                course_id=course_id,
+                schedule_id=schedule_id,
+                date=(date.today() + timedelta(days=days_ahead)).strftime("%m-%d-%Y"),
+                time_from="00:00",
+                time_to="23:59",
+                players=2,
+                booking_class=booking_class,
+            )
+        except (PermissionError, ValueError, RuntimeError):
+            return False
+        if times:
+            return True
+        # Empty but not rejected — the pairing is valid, sheet just isn't open.
+        usable = True
+    return usable
+
 
 def _check_response(resp: requests.Response, label: str):
     if resp.status_code == 401:

@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "teetimes-dev",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["devserver.py"],
+      "port": 5055
+    }
+  ]
+}

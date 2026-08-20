@@ -75,12 +75,27 @@ def init_db():
                     logs                 JSONB DEFAULT '[]'
                 )
             """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS platform_cache (
+                    website     TEXT PRIMARY KEY,
+                    platform    TEXT NOT NULL,
+                    booking_url TEXT DEFAULT '',
+                    checked_at  TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
             # ── Migrations: add columns that may not exist in older DBs ──
             migrations = [
                 "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS platform TEXT DEFAULT 'foreup'",
                 "ALTER TABLE courses ADD COLUMN IF NOT EXISTS platform TEXT DEFAULT 'foreup'",
                 "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS be_alias TEXT DEFAULT ''",
                 "ALTER TABLE courses ADD COLUMN IF NOT EXISTS be_alias TEXT DEFAULT ''",
+                # Snipe mode: burst-poll the instant a tee sheet opens.
+                "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS snipe_at TIMESTAMPTZ",
+                "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS hold_result JSONB",
+                # Every booking class found on a course, so the UI can offer them.
+                "ALTER TABLE courses ADD COLUMN IF NOT EXISTS booking_classes JSONB DEFAULT '[]'",
+                "ALTER TABLE courses ADD COLUMN IF NOT EXISTS online_open_time TEXT DEFAULT ''",
+                "ALTER TABLE courses ADD COLUMN IF NOT EXISTS timezone TEXT DEFAULT ''",
             ]
             for sql in migrations:
                 try:
@@ -169,15 +184,20 @@ def save_course(course_id: str, info: dict):
         with get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
-                    INSERT INTO courses (course_id, schedule_id, booking_class, name, url, platform, be_alias)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    INSERT INTO courses (course_id, schedule_id, booking_class, name, url,
+                                         platform, be_alias, booking_classes,
+                                         online_open_time, timezone)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (course_id) DO UPDATE SET
-                        schedule_id   = EXCLUDED.schedule_id,
-                        booking_class = EXCLUDED.booking_class,
-                        name          = EXCLUDED.name,
-                        url           = EXCLUDED.url,
-                        platform      = EXCLUDED.platform,
-                        be_alias      = EXCLUDED.be_alias
+                        schedule_id      = EXCLUDED.schedule_id,
+                        booking_class    = EXCLUDED.booking_class,
+                        name             = EXCLUDED.name,
+                        url              = EXCLUDED.url,
+                        platform         = EXCLUDED.platform,
+                        be_alias         = EXCLUDED.be_alias,
+                        booking_classes  = EXCLUDED.booking_classes,
+                        online_open_time = EXCLUDED.online_open_time,
+                        timezone         = EXCLUDED.timezone
                 """, (
                     course_id,
                     info["schedule_id"],
@@ -186,10 +206,53 @@ def save_course(course_id: str, info: dict):
                     info["url"],
                     info.get("platform", "foreup"),
                     info.get("be_alias", ""),
+                    json.dumps(info.get("booking_classes", [])),
+                    info.get("online_open_time", ""),
+                    info.get("timezone", ""),
                 ))
         logger.info(f"Saved course {course_id}: {info['name']} (platform={info.get('platform','foreup')})")
     except Exception as e:
         logger.error(f"Could not save course: {e}")
+
+
+# ── Platform cache (course discovery) ─────────────────────────────────────────
+
+# Re-sniff a site after this long; courses do change booking providers.
+PLATFORM_CACHE_DAYS = 30
+
+
+def load_platform_cache() -> dict:
+    """{website: {platform, booking_url}} for entries that are still fresh."""
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT website, platform, booking_url FROM platform_cache "
+                    "WHERE checked_at > NOW() - INTERVAL '%s days'" % PLATFORM_CACHE_DAYS
+                )
+                return {
+                    w: {"platform": p, "booking_url": b or ""}
+                    for w, p, b in cur.fetchall()
+                }
+    except Exception as e:
+        logger.warning(f"Could not load platform cache: {e}")
+        return {}
+
+
+def save_platform_cache(website: str, platform: str, booking_url: str = ""):
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO platform_cache (website, platform, booking_url, checked_at)
+                    VALUES (%s, %s, %s, NOW())
+                    ON CONFLICT (website) DO UPDATE SET
+                        platform    = EXCLUDED.platform,
+                        booking_url = EXCLUDED.booking_url,
+                        checked_at  = NOW()
+                """, (website, platform, booking_url))
+    except Exception as e:
+        logger.warning(f"Could not cache platform for {website}: {e}")
 
 
 def delete_course(course_id: str):
@@ -231,13 +294,18 @@ def insert_job(job: dict):
                 INSERT INTO jobs (
                     id, course_id, course_name, schedule_id, booking_class,
                     course_url, target_date, time_from, time_to,
-                    players, holes, status, platform, be_alias, logs
+                    players, holes, status, platform, be_alias, snipe_at, logs
                 ) VALUES (
                     %(id)s, %(course_id)s, %(course_name)s, %(schedule_id)s, %(booking_class)s,
                     %(course_url)s, %(target_date)s, %(time_from)s, %(time_to)s,
-                    %(players)s, %(holes)s, %(status)s, %(platform)s, %(be_alias)s, %(logs)s
+                    %(players)s, %(holes)s, %(status)s, %(platform)s, %(be_alias)s,
+                    %(snipe_at)s, %(logs)s
                 )
-            """, {**job, "platform": job.get("platform", "foreup"), "be_alias": job.get("be_alias", ""), "logs": json.dumps(job.get("logs", []))})
+            """, {**job,
+                  "platform":  job.get("platform", "foreup"),
+                  "be_alias":  job.get("be_alias", ""),
+                  "snipe_at":  job.get("snipe_at") or None,
+                  "logs":      json.dumps(job.get("logs", []))})
 
 
 def update_job_fields(job_id: str, fields: dict):
@@ -302,17 +370,18 @@ def append_job_log(job_id: str, entry: str, max_logs: int = 100):
 
 def _deserialize_job(row: dict) -> dict:
     """Convert DB row types to plain Python dicts."""
-    for field in ("available_times", "booked_confirmation", "logs"):
+    nullable = ("booked_confirmation", "hold_result")
+    for field in ("available_times", "booked_confirmation", "logs", "hold_result"):
         val = row.get(field)
         if isinstance(val, str):
             try:
                 row[field] = json.loads(val)
             except Exception:
-                row[field] = [] if field != "booked_confirmation" else None
-        elif val is None and field != "booked_confirmation":
+                row[field] = None if field in nullable else []
+        elif val is None and field not in nullable:
             row[field] = []
     # Convert timestamps to ISO strings
-    for field in ("last_polled", "created_at"):
+    for field in ("last_polled", "created_at", "snipe_at"):
         val = row.get(field)
         if val and hasattr(val, "isoformat"):
             row[field] = val.isoformat()

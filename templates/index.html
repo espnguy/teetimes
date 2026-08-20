@@ -218,6 +218,33 @@
     </div>
   </div>
 
+  <!-- Course discovery -->
+  <div class="card">
+    <h2>🔎 Find Courses Near You</h2>
+    <div style="font-size:.82rem;color:var(--gray);margin-bottom:12px">
+      Enter a zip code to see nearby courses and which booking platform each uses.
+      Supported ones can be watched with one click.
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+      <div style="flex:0 0 130px">
+        <label>Zip Code</label>
+        <input id="discoverZip" type="text" inputmode="numeric" maxlength="5"
+               placeholder="76051" onkeydown="if(event.key==='Enter')discoverCourses()">
+      </div>
+      <div style="flex:0 0 130px">
+        <label>Radius</label>
+        <select id="discoverRadius">
+          <option value="10">10 miles</option>
+          <option value="25" selected>25 miles</option>
+          <option value="50">50 miles</option>
+        </select>
+      </div>
+      <button class="btn btn-outline" onclick="discoverCourses()" id="discoverBtn"
+              style="flex:0 0 auto">🔎 Search</button>
+    </div>
+    <div id="discoverResults" style="margin-top:14px"></div>
+  </div>
+
   <div class="grid-2">
 
     <!-- Add Job Form -->
@@ -270,7 +297,7 @@
 
       <div class="form-row">
         <label>Target Date</label>
-        <input id="targetDate" type="date">
+        <input id="targetDate" type="date" onchange="onSnipeToggle()">
       </div>
       <div class="form-row-2">
         <div>
@@ -300,6 +327,22 @@
           </select>
         </div>
       </div>
+      <!-- Snipe mode -->
+      <div style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:8px;
+                  padding:12px;margin-bottom:14px">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:600">
+          <input id="snipeMode" type="checkbox" style="width:auto;margin:0"
+                 onchange="onSnipeToggle()">
+          🎯 Snipe at release
+        </label>
+        <div style="font-size:.78rem;color:var(--gray);margin-top:6px">
+          Burst-polls 4×/sec from 20s before the sheet opens, instead of once every
+          2 minutes — then tries to put the earliest matching time on hold and
+          alerts you to confirm.
+        </div>
+        <div id="releaseInfo" style="font-size:.8rem;margin-top:8px"></div>
+      </div>
+
       <button class="btn btn-primary" onclick="addJob()" id="addBtn">
         ➕ Start Watching
       </button>
@@ -618,6 +661,116 @@ async function deleteCourse(courseId) {
 
 
 // ── Add job ────────────────────────────────────────────────────────────────
+// ── Course discovery ───────────────────────────────────────────────────────
+async function discoverCourses() {
+  const zip    = document.getElementById('discoverZip').value.trim();
+  const radius = document.getElementById('discoverRadius').value;
+  const out    = document.getElementById('discoverResults');
+  const btn    = document.getElementById('discoverBtn');
+
+  if (!/^\d{5}$/.test(zip)) { toast('Enter a 5-digit zip code', 'error'); return; }
+
+  btn.disabled = true; btn.textContent = '⏳ Searching…';
+  out.innerHTML = '<div class="empty-state">Looking up courses and checking each '
+                + 'booking platform — this takes a few seconds…</div>';
+  try {
+    const res  = await fetch(`/api/discover?zip=${zip}&radius=${radius}`);
+    const data = await res.json();
+    if (data.error) { out.innerHTML = `<div class="empty-state">${data.error}</div>`; return; }
+    if (!data.courses.length) {
+      out.innerHTML = '<div class="empty-state">No courses found in that radius.</div>';
+      return;
+    }
+    out.innerHTML = renderDiscovery(data);
+  } catch(e) {
+    out.innerHTML = `<div class="empty-state">Search failed: ${e.message}</div>`;
+  } finally {
+    btn.disabled = false; btn.textContent = '🔎 Search';
+  }
+}
+
+function renderDiscovery(data) {
+  const c = data.counts;
+  const head = `<div style="font-size:.82rem;margin-bottom:10px">
+      <strong>${c.supported}</strong> of ${c.total} courses near
+      ${data.location.city}, ${data.location.state} can be watched
+      <span style="color:var(--gray)">(${c.private} private clubs listed last)</span>
+    </div>`;
+
+  const rows = data.courses.map(course => {
+    let badge, action = '';
+    if (course.supported) {
+      badge = `<span style="background:#d1fae5;color:#047857;padding:2px 8px;
+               border-radius:99px;font-size:.72rem;font-weight:600">
+               ${course.already_saved ? 'saved' : course.platform_label}</span>`;
+      action = course.booking_url
+        ? `<button class="btn btn-outline btn-sm"
+             onclick="useDiscovered(${JSON.stringify(course.booking_url).replace(/"/g,'&quot;')})">
+             Watch</button>`
+        : '';
+    } else if (course.platform !== 'unknown') {
+      badge = `<span style="background:#fef3c7;color:#92400e;padding:2px 8px;
+               border-radius:99px;font-size:.72rem;font-weight:600"
+               title="${course.note}">${course.platform_label}</span>`;
+    } else {
+      badge = `<span style="background:#f1f5f9;color:#64748b;padding:2px 8px;
+               border-radius:99px;font-size:.72rem" title="${course.note}">not detected</span>`;
+    }
+
+    return `<div style="display:flex;align-items:center;gap:10px;padding:7px 0;
+                 border-bottom:1px solid #f1f5f9;${course.private ? 'opacity:.55' : ''}">
+        <div style="flex:1;min-width:0">
+          <div style="font-size:.86rem;font-weight:600;overflow:hidden;
+                      text-overflow:ellipsis;white-space:nowrap">${course.name}</div>
+          ${course.website ? `<a href="${course.website}" target="_blank" rel="noopener"
+             style="font-size:.72rem;color:var(--gray)">${course.website.replace(/^https?:\/\//,'').slice(0,44)}</a>` : ''}
+        </div>
+        ${badge}
+        <div style="flex:0 0 auto">${action}</div>
+      </div>`;
+  }).join('');
+
+  return head + rows;
+}
+
+function useDiscovered(bookingUrl) {
+  document.getElementById('courseUrl').value = bookingUrl;
+  onCourseUrlChange();
+  document.getElementById('courseUrl').scrollIntoView({behavior:'smooth', block:'center'});
+  toast('Course loaded into the watch form below', 'success');
+}
+
+// ── Snipe mode ─────────────────────────────────────────────────────────────
+async function onSnipeToggle() {
+  const info = document.getElementById('releaseInfo');
+  if (!document.getElementById('snipeMode').checked) { info.textContent = ''; return; }
+
+  const courseUrl  = document.getElementById('courseUrl').value.trim();
+  const targetDate = document.getElementById('targetDate').value;
+  if (!courseUrl || !targetDate) {
+    info.innerHTML = '<span style="color:#92400e">Pick a course and target date first.</span>';
+    return;
+  }
+  const [y, m, d] = targetDate.split('-');
+  info.textContent = '⏳ Checking when this sheet opens…';
+  try {
+    const res = await fetch('/api/release_time', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ course_url: courseUrl, target_date: `${m}-${d}-${y}` })
+    });
+    const data = await res.json();
+    if (data.error || !data.available) {
+      info.innerHTML = `<span style="color:#92400e">⚠️ ${data.error || data.reason}</span>`;
+      document.getElementById('snipeMode').checked = false;
+      return;
+    }
+    info.innerHTML = `<span style="color:#047857">🎯 Sheet opens <strong>${data.description}</strong>`
+                   + ` — burst polling starts 20s before.</span>`;
+  } catch(e) {
+    info.innerHTML = `<span style="color:#92400e">Could not check release time: ${e.message}</span>`;
+  }
+}
+
 async function addJob() {
   const btn = document.getElementById('addBtn');
   const courseUrl  = document.getElementById('courseUrl').value.trim();
@@ -664,18 +817,21 @@ async function addJob() {
     const res = await fetch('/api/add_job', {
       method: 'POST', headers: {'Content-Type':'application/json'},
       body: JSON.stringify({ course_url: courseUrl, target_date: fmtDate,
-                             time_from: timeFrom, time_to: timeTo, players, holes })
+                             time_from: timeFrom, time_to: timeTo, players, holes,
+                             snipe: document.getElementById('snipeMode').checked })
     });
     const data = await res.json();
     if (data.error) {
       toast('Error: ' + data.error, 'error');
       return;
     }
-    toast('Watch started! 🎉', 'success');
+    toast(data.release ? `Sniper armed for ${data.release} 🎯` : 'Watch started! 🎉', 'success');
     resolvedCourse = null;
     document.getElementById('courseUrl').value = '';
     document.getElementById('courseInfo').textContent = '';
     document.getElementById('savedCourseSelect').value = '';
+    document.getElementById('snipeMode').checked = false;
+    document.getElementById('releaseInfo').textContent = '';
     refreshJobs();
     loadSavedCourses();
   } catch(e) {
@@ -702,6 +858,16 @@ async function refreshJobs() {
 // Auto-refresh every 30 seconds
 setInterval(refreshJobs, 30000);
 
+function snipeBadge(job) {
+  if (!job.snipe_at) return '';
+  const when = new Date(job.snipe_at);
+  const label = when.toLocaleString(undefined,
+    {weekday:'short', month:'short', day:'numeric', hour:'numeric', minute:'2-digit'});
+  return `<span style="background:#e0f2fe;color:#0369a1;padding:2px 8px;border-radius:99px;
+          font-size:.72rem;font-weight:600" title="Burst polling starts 20s before release">
+          🎯 ${label}</span>`;
+}
+
 function renderJob(job) {
   const badge = statusBadge(job.status);
   const lastPoll = job.last_polled
@@ -715,7 +881,7 @@ function renderJob(job) {
       <div>
         <div class="job-title">
           📅 ${job.target_date} &nbsp;⏰ ${job.time_from}–${job.time_to}
-          &nbsp; ${badge}
+          &nbsp; ${badge} ${snipeBadge(job)}
         </div>
         <div class="job-meta">
           ${job.players} players · ${job.holes || 18} holes
@@ -725,6 +891,11 @@ function renderJob(job) {
         <div class="job-meta" style="word-break:break-all;margin-top:2px;font-size:.75rem">
           ${job.course_url}
         </div>
+        ${job.hold_result ? `
+          <div style="margin-top:8px;background:#fef3c7;border:1px solid #fcd34d;
+                      border-radius:8px;padding:8px 12px;font-size:.82rem;color:#92400e;font-weight:600">
+            🔒 Held — not booked yet. Open the booking page and confirm before it lapses.
+          </div>` : ''}
         ${job.booked_confirmation ? `
           <div style="margin-top:8px;background:var(--green-pale);border-radius:8px;
                       padding:8px 12px;font-size:.82rem;color:var(--green);font-weight:600">

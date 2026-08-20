@@ -238,7 +238,7 @@ class GolfNowClient:
         from datetime import datetime as _dt
         try:
             d = _dt.strptime(date, "%Y-%m-%d")
-            gn_date = d.strftime("%b %-d %Y")  # e.g. "Mar 20 2026"
+            gn_date = f"{d.strftime('%b')} {d.day} {d.year}"  # e.g. "Mar 20 2026"
         except Exception:
             gn_date = date
 

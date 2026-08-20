@@ -7,7 +7,7 @@ import logging
 import threading
 import time
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from foreup_client import ForeUpClient, parse_course_url
 from notifier import notify_times_available
 import db
@@ -16,11 +16,23 @@ logger = logging.getLogger(__name__)
 
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", 120))
 
+# Snipe mode — for courses that release their sheet at a fixed moment (Grapevine
+# opens at 06:00 local). A 120s poll can miss the good times by two minutes, so
+# around the release instant we burst-poll instead.
+# Main loop granularity. Comfortably finer than SNIPE_LEAD_SECONDS, so a burst
+# is never started late, without hammering Postgres with a query every second.
+TICK                 = 5.0
+SNIPE_LEAD_SECONDS   = 20     # start bursting this long before the release
+SNIPE_BURST_INTERVAL = 0.25   # ~4 requests/sec while the window is open
+SNIPE_WINDOW_SECONDS = 120    # give up this long after the release
+
 
 class TeeTimeScheduler:
     def __init__(self):
         self._thread = None
         self._running = False
+        self._next_poll = {}      # job_id -> monotonic deadline
+        self._snipe_threads = {}  # job_id -> live burst thread
 
     def start(self):
         if self._running:
@@ -51,6 +63,7 @@ class TeeTimeScheduler:
             "holes":         int(data.get("holes", 18)),
             "platform":      data.get("platform", "foreup"),
             "status":        "polling",
+            "snipe_at":      data.get("snipe_at") or None,
             "logs":          [],
         }
         db.insert_job(job)
@@ -59,10 +72,16 @@ class TeeTimeScheduler:
             f"{data['target_date']} {data['time_from']}–{data['time_to']} "
             f"({data['players']} players)"
         )
+        if job["snipe_at"]:
+            self._log(job_id,
+                f"🎯 Snipe armed for {job['snipe_at']} — will burst-poll from "
+                f"{SNIPE_LEAD_SECONDS}s before release."
+            )
         return job_id
 
     def remove_job(self, job_id: str):
         db.delete_job(job_id)
+        self._next_poll.pop(job_id, None)
 
     def get_job(self, job_id: str) -> dict | None:
         return db.load_job(job_id)
@@ -92,21 +111,212 @@ class TeeTimeScheduler:
         except Exception:
             return False
 
+    @staticmethod
+    def _snipe_at(job: dict):
+        """Parse the job's snipe_at into an aware datetime, or None."""
+        raw = job.get("snipe_at")
+        if not raw:
+            return None
+        if isinstance(raw, datetime):
+            dt = raw
+        else:
+            try:
+                dt = datetime.fromisoformat(str(raw))
+            except ValueError:
+                return None
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+    def _snipe_phase(self, job: dict) -> str:
+        """
+        Where is this job relative to its release window?
+        'none' (not a snipe job), 'waiting', 'burst', or 'over'.
+        """
+        target = self._snipe_at(job)
+        if target is None:
+            return "none"
+        delta = (datetime.now(timezone.utc) - target).total_seconds()
+        if delta < -SNIPE_LEAD_SECONDS:
+            return "waiting"
+        if delta <= SNIPE_WINDOW_SECONDS:
+            return "burst"
+        return "over"
+
     def _poll_loop(self):
+        """
+        Tick fast, poll each job only when it is due.
+
+        Regular jobs run every POLL_INTERVAL. Snipe jobs switch to
+        SNIPE_BURST_INTERVAL for the window around their release time.
+        """
         while self._running:
             try:
-                jobs = db.load_all_jobs()
-                for job in jobs:
-                    # Auto-expire jobs whose target date has passed
-                    if job["status"] in ("polling", "available"):
-                        if self._is_expired(job):
-                            db.update_job_fields(job["id"], {"status": "expired"})
-                            self._log(job["id"], f"⏰ Job expired — {job['target_date']} has passed.")
-                            continue
-                        self._poll_job(job["id"])
+                for job in db.load_all_jobs():
+                    if job["status"] not in ("polling", "available"):
+                        continue
+
+                    job_id = job["id"]
+                    if self._is_expired(job):
+                        db.update_job_fields(job_id, {"status": "expired"})
+                        self._log(job_id, f"⏰ Job expired — {job['target_date']} has passed.")
+                        self._next_poll.pop(job_id, None)
+                        continue
+
+                    phase = self._snipe_phase(job)
+
+                    if phase == "burst":
+                        # Hand off to a dedicated thread so the burst runs at its
+                        # own cadence instead of this loop's, and without a DB
+                        # round-trip per attempt.
+                        if job_id not in self._snipe_threads:
+                            t = threading.Thread(
+                                target=self._snipe_run, args=(job_id,), daemon=True)
+                            self._snipe_threads[job_id] = t
+                            t.start()
+                        continue
+
+                    if job_id in self._snipe_threads:
+                        continue  # burst thread owns this job right now
+
+                    if phase == "over":
+                        # Only reachable if the app restarted after the window
+                        # closed. Clear the arm so the UI stops advertising it.
+                        db.update_job_fields(job_id, {"snipe_at": None})
+                        self._log(job_id,
+                            "🎯 Release window already passed — back to normal polling.")
+
+                    now = time.monotonic()
+                    if now < self._next_poll.get(job_id, 0.0):
+                        continue
+                    self._next_poll[job_id] = now + POLL_INTERVAL
+                    self._poll_job(job_id)
             except Exception as e:
                 logger.exception(f"Poll loop error: {e}")
-            time.sleep(POLL_INTERVAL)
+            time.sleep(TICK)
+
+    # ── Snipe mode ────────────────────────────────────────────────────────────
+
+    def _snipe_run(self, job_id: str):
+        """
+        Burst-poll a single job across its release window.
+
+        Runs in its own thread at SNIPE_BURST_INTERVAL, reusing one client (and
+        one authenticated session) for every attempt so each retry is a single
+        HTTP round-trip. Stops as soon as times appear.
+        """
+        try:
+            job = db.load_job(job_id)
+            if not job:
+                return
+
+            target = self._snipe_at(job)
+            deadline = target.timestamp() + SNIPE_WINDOW_SECONDS
+            cfg = db.load_config()
+            client = self._client_for(job, cfg)
+
+            self._log(job_id,
+                f"🎯 Release window open — burst-polling every "
+                f"{SNIPE_BURST_INTERVAL}s until {int(SNIPE_WINDOW_SECONDS)}s past release.")
+
+            attempts = 0
+            while self._running and time.time() < deadline:
+                attempts += 1
+                try:
+                    times = self._fetch(client, job)
+                except Exception as e:
+                    # Transient errors are expected while the sheet is flipping.
+                    if attempts % 40 == 0:
+                        self._log(job_id, f"… {attempts} attempts, last error: {e}")
+                    times = []
+
+                if times:
+                    self._log(job_id,
+                        f"🎯 Sheet opened after {attempts} attempt(s) — "
+                        f"{len(times)} time(s) in window.")
+                    self._handle_snipe_hit(job, times, cfg, client)
+                    return
+
+                time.sleep(SNIPE_BURST_INTERVAL)
+
+            self._log(job_id,
+                f"🎯 Release window closed after {attempts} attempts with nothing in "
+                f"{job['time_from']}–{job['time_to']}. Reverting to normal polling.")
+            db.update_job_fields(job_id, {"snipe_at": None})
+        except Exception as e:
+            logger.exception(f"Snipe run failed for job {job_id}")
+            self._log(job_id, f"❌ Snipe error: {e}")
+        finally:
+            self._snipe_threads.pop(job_id, None)
+
+    def _handle_snipe_hit(self, job: dict, times: list, cfg: dict, client):
+        """Times appeared during the release window — try to hold, then notify."""
+        job_id = job["id"]
+        db.update_job_fields(job_id, {
+            "status":          "available",
+            "available_times": times,
+            "last_polled":     datetime.now(),
+        })
+
+        hold = None
+        if job.get("platform", "foreup") == "foreup":
+            best = times[0]   # earliest slot inside the requested window
+            try:
+                hold = client.hold(best, players=job["players"], holes=job.get("holes", 18))
+                db.update_job_fields(job_id, {"hold_result": hold})
+                self._log(job_id,
+                    f"🔒 Held {best.get('time')} for {job['players']} — "
+                    f"confirm in the browser before it lapses.")
+            except PermissionError as e:
+                self._log(job_id, f"🔓 Could not hold (booking class restricted): {e}")
+            except Exception as e:
+                self._log(job_id, f"🔓 Hold attempt failed: {e}")
+
+        sent = notify_times_available(
+            user_token=cfg.get("pushover_user_token", ""),
+            app_token=cfg.get("pushover_app_token", ""),
+            job=job,
+            times=times,
+            dashboard_url=cfg.get("dashboard_url", ""),
+            held=hold is not None,
+        )
+        db.update_job_fields(job_id, {"notification_sent": sent})
+        self._log(job_id,
+            "📲 Notification sent." if sent else "⚠️ Pushover not configured.")
+
+    @staticmethod
+    def _client_for(job: dict, cfg: dict):
+        """
+        Build the right client for a job's platform.
+
+        ForeUp public booking classes serve availability without a login, so
+        missing credentials are not fatal — only restricted classes will 401.
+        """
+        if job.get("platform", "foreup") in ("teeitup", "golfnow"):
+            from golfnow_client import GolfNowClient
+            return GolfNowClient()
+        return ForeUpClient(cfg.get("email"), cfg.get("password"))
+
+    @staticmethod
+    def _fetch(client, job: dict) -> list:
+        """One availability request for a job, using an already-built client."""
+        platform = job.get("platform", "foreup")
+        extra = {}
+        if platform in ("teeitup", "golfnow"):
+            extra["platform"] = platform
+            # Pass be_alias for X-Be-Alias header (TeeItUp/Kenna)
+            if job.get("be_alias"):
+                extra["be_alias"] = job["be_alias"]
+
+        return client.fetch_tee_times(
+            course_id=job["course_id"],
+            schedule_id=job["schedule_id"],
+            date=job["target_date"],
+            time_from=job["time_from"],
+            time_to=job["time_to"],
+            players=job["players"],
+            holes=job.get("holes", 18),
+            booking_class=job.get("booking_class", ""),
+            **extra,
+        )
 
     def _poll_job(self, job_id: str):
         job = db.load_job(job_id)
@@ -114,41 +324,10 @@ class TeeTimeScheduler:
             return
 
         cfg = db.load_config()
-        email    = cfg.get("email")
-        password = cfg.get("password")
-        platform = job.get("platform", "foreup")
-
-        # Only ForeUp jobs need credentials
-        if platform not in ("teeitup", "golfnow") and (not email or not password):
-            self._log(job_id, "⚠️ No ForeUp credentials configured — skipping poll. Go to Settings.")
-            return
 
         try:
-            # Use the right client based on platform
-            if platform in ("teeitup", "golfnow"):
-                from golfnow_client import GolfNowClient
-                client = GolfNowClient()
-            else:
-                client = ForeUpClient(email, password)
-
-            extra = {}
-            if platform in ("teeitup", "golfnow"):
-                extra["platform"] = platform
-                # Pass be_alias for X-Be-Alias header (TeeItUp/Kenna)
-                if job.get("be_alias"):
-                    extra["be_alias"] = job["be_alias"]
-
-            times = client.fetch_tee_times(
-                course_id=job["course_id"],
-                schedule_id=job["schedule_id"],
-                date=job["target_date"],
-                time_from=job["time_from"],
-                time_to=job["time_to"],
-                players=job["players"],
-                holes=job.get("holes", 18),
-                booking_class=job.get("booking_class", ""),
-                **extra,
-            )
+            client = self._client_for(job, cfg)
+            times = self._fetch(client, job)
 
             now_str = datetime.now().strftime("%H:%M:%S")
             db.update_job_fields(job_id, {

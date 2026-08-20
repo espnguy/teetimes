@@ -19,7 +19,12 @@
 | **TeeItUp (.com)** | ⚠️ Requires manual ObjectId | `https://course-name.book.teeitup.com/?course=1307` |
 | **Course website** | ✅ Auto-detects embedded platform | `https://www.pecanhollowgc.com/book-a-tee-time/` |
 
-**ForeUp** requires your ForeUp account credentials. **GolfNow** and **TeeItUp** require no login.
+**GolfNow** and **TeeItUp** require no login. **ForeUp** only needs credentials for
+restricted booking classes — most courses expose a *Public* class that serves
+availability anonymously, and the resolver picks it automatically.
+
+Recognised but **not supported** (detected during discovery and labelled as such):
+Chronogolf / Lightspeed, Teesnap, Quick18.
 
 > **TeeItUp note:** TeeItUp is powered by the Kenna/Lightspeed Golf backend. To add a TeeItUp course, paste the URL — when auto-detect fails, open DevTools on the booking page, pick a date, find the request to `phx-api-be-east-1b.kenna.io/course/{objectId}/tee-time/locks`, and copy the 24-char hex ObjectId into the Kenna ObjectId field.
 
@@ -37,6 +42,52 @@
 
 ---
 
+## 🎯 Snipe mode
+
+Municipal courses release their sheet at a fixed moment — Grapevine opens at
+**06:00 America/Chicago, 6 days ahead**, so a Sunday round becomes bookable at
+6am the Monday before. A 2-minute poll can miss the good times by two minutes.
+
+Tick **Snipe at release** when adding a watch and the app will:
+
+1. Derive the release instant from the course's own `online_open_time` and
+   timezone, scraped during course resolution (no hand-entered times, and DST is
+   handled — 11:00 UTC in summer, 12:00 in winter).
+2. Burst-poll **4×/sec starting 20s before** release, on a dedicated thread
+   reusing one HTTP session. Detection lands within ~250ms of the sheet opening.
+3. Attempt a **hold** on the earliest matching slot via ForeUp's
+   `pending_reservation` endpoint — the same call the booking page makes when you
+   click a time.
+4. Send a **priority-2 Pushover alert** that re-nags every 30s for 5 minutes.
+
+> **A hold is not a booking.** Nothing is charged and the round is not confirmed
+> until you complete checkout in the browser. Holds lapse after a few minutes.
+>
+> A booking class with `block_online_booking` set cannot complete an online
+> booking at all — the hold will be refused and the job falls back to a fast
+> notification. The job log records exactly what the course said.
+
+---
+
+## 🔎 Course discovery
+
+Enter a zip code to see what's nearby and whether it can be watched:
+
+- **zippopotam.us** turns the zip into coordinates
+- **OpenStreetMap Overpass** lists golf courses in the radius
+- Each course website is fetched concurrently and fingerprinted for its booking
+  platform, following `/tee-times`-style links when the landing page has none
+- Verdicts are cached in Postgres for 30 days
+
+Courses already in your library are matched by name and always win, which covers
+the ones OSM has no website for. Private clubs are detected and listed last.
+
+Coverage is honest rather than optimistic: a course whose widget is rendered
+purely in JavaScript shows as *not detected*, and you can still paste its booking
+URL directly.
+
+---
+
 ## Features
 
 - 🔄 **Polls every 2 minutes** while you do other things
@@ -47,6 +98,8 @@
 - 🏌️ **Saved course library** — set up a course once, reuse with one click
 - 🔍 **Auto-detects course IDs** — paste any booking URL and IDs are scraped automatically
 - 🌐 **Multi-platform** — ForeUp and GolfNow confirmed, TeeItUp with manual setup
+- 🎯 **Snipe mode** — burst-polls the instant a sheet opens and tries to hold a slot
+- 🔎 **Zip-code discovery** — find nearby courses and see which are supported
 
 ---
 
@@ -89,14 +142,24 @@ teetime-booker/
 ├── scheduler.py         ← Background polling thread (starts at module load)
 ├── foreup_client.py     ← ForeUp HTTP client (session init, login, fetch times)
 ├── golfnow_client.py    ← GolfNow/TeeItUp HTTP client (no auth required)
-├── course_resolver.py   ← Auto-detects platform and IDs from any booking URL
+├── course_resolver.py   ← Auto-detects platform, IDs, and booking classes
+├── discovery.py         ← Zip-code course search + platform fingerprinting
+├── release.py           ← Works out when a course's sheet opens (snipe timing)
 ├── notifier.py          ← Pushover push notifications
+├── devserver.py         ← Runs the dashboard with an in-memory DB (local UI work)
+├── test_snipe.py        ← Exercises the burst engine against a simulated release
 ├── templates/
 │   └── index.html       ← Single-page dashboard UI
 ├── requirements.txt
 ├── Procfile             ← gunicorn --workers 1 --threads 4
 └── README.md
 ```
+
+Run `python test_snipe.py` to verify the snipe engine — it fakes a sheet opening
+mid-burst and asserts the hold and notification both fire. Worth running after
+any scheduler change, since the real thing only executes once a week.
+
+`python devserver.py` serves the dashboard on port 5055 without Postgres.
 
 ---
 

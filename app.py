@@ -10,6 +10,8 @@ from foreup_client import ForeUpClient, parse_course_url
 from course_resolver import resolve_course_from_url
 from scheduler import TeeTimeScheduler
 from notifier import notify_test
+from release import compute_release, describe
+import discovery
 import db
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -61,9 +63,69 @@ def resolve_course():
         return jsonify({"error": str(e)}), 400
 
 
+@app.route("/api/discover")
+def discover_courses():
+    """Find courses near a zip code and report which ones are supported."""
+    zip_code = (request.args.get("zip") or "").strip()
+    if not zip_code:
+        return jsonify({"error": "zip is required"}), 400
+    try:
+        radius = int(request.args.get("radius", discovery.DEFAULT_RADIUS_MILES))
+    except ValueError:
+        radius = discovery.DEFAULT_RADIUS_MILES
+    radius = max(1, min(radius, 100))
+
+    try:
+        result = discovery.discover(zip_code, radius_miles=radius)
+    except Exception as e:
+        logger.exception("discover failed")
+        return jsonify({"error": str(e)}), 500
+
+    if "error" in result:
+        return jsonify(result), 400
+    return jsonify(result)
+
+
 @app.route("/api/courses")
 def get_courses():
     return jsonify(db.load_courses())
+
+
+@app.route("/api/release_time", methods=["POST"])
+def release_time():
+    """
+    When does this course's sheet open for a given date?
+    Lets the UI show the release moment before a snipe job is armed.
+    """
+    data = request.json or {}
+    url         = (data.get("course_url") or "").strip()
+    target_date = (data.get("target_date") or "").strip()
+    if not url or not target_date:
+        return jsonify({"error": "course_url and target_date are required"}), 400
+
+    try:
+        course = resolve_course_from_url(url)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+    release = compute_release(
+        target_date=target_date,
+        online_open_time=course.get("online_open_time", ""),
+        course_timezone=course.get("timezone", ""),
+    )
+    if release is None:
+        return jsonify({
+            "available": False,
+            "reason": "This course does not publish an online open time, so the "
+                      "release moment cannot be derived.",
+        })
+    return jsonify({
+        "available":   True,
+        "release_utc": release.isoformat(),
+        "description": describe(release, course.get("timezone", "")),
+        "timezone":    course.get("timezone", ""),
+        "open_time":   course.get("online_open_time", ""),
+    })
 
 
 @app.route("/api/courses/<course_id>", methods=["PUT"])
@@ -117,8 +179,26 @@ def add_job():
             data["platform"] = detected if detected != "unknown" else "foreup"
         else:
             data["platform"] = stored_platform
+
+        # Snipe mode — arm a burst poll for the instant the sheet opens.
+        release_note = None
+        if data.get("snipe"):
+            release = compute_release(
+                target_date=data["target_date"],
+                online_open_time=course.get("online_open_time", ""),
+                course_timezone=course.get("timezone", ""),
+            )
+            if release is None:
+                return jsonify({"error":
+                    "Cannot arm snipe: this course does not publish an online "
+                    "open time and timezone. Re-resolve the course, or add the "
+                    "job without snipe mode."}), 400
+            data["snipe_at"] = release
+            release_note = describe(release, course.get("timezone", ""))
+
         job_id = scheduler.add_job(data)
-        return jsonify({"success": True, "job_id": job_id, "course": course})
+        return jsonify({"success": True, "job_id": job_id, "course": course,
+                        "release": release_note})
     except Exception as e:
         logger.exception("add_job failed")
         return jsonify({"error": str(e)}), 500

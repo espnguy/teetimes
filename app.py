@@ -7,7 +7,7 @@ import os
 import logging
 from flask import Flask, render_template, jsonify, request, redirect, url_for
 from foreup_client import ForeUpClient, parse_course_url
-from course_resolver import resolve_course_from_url
+from course_resolver import resolve_course_from_url, RESOLVER_VERSION
 from scheduler import TeeTimeScheduler
 from notifier import notify_test
 from release import compute_release, describe
@@ -143,9 +143,32 @@ def update_course(course_id):
         "url":           data.get("url", ""),
         "platform":      platform,
         "be_alias":      data.get("be_alias", ""),
+        # Stamp as current so a hand-entered override is never silently
+        # overwritten by auto-detection on the next lookup.
+        "resolver_version": RESOLVER_VERSION,
+        "online_open_time": data.get("online_open_time", ""),
+        "timezone":         data.get("timezone", ""),
     }
     db.save_course(course_id, info)
     return jsonify({"success": True, "course": info})
+
+
+@app.route("/api/courses/<course_id>/redetect", methods=["POST"])
+def redetect_course(course_id):
+    """Force a fresh detection for a saved course, ignoring the cached row."""
+    courses = db.load_courses()
+    saved = courses.get(course_id)
+    if not saved:
+        return jsonify({"error": "Course not found"}), 404
+    url = saved.get("url") or ""
+    if not url:
+        return jsonify({"error": "This course has no URL stored to re-detect from."}), 400
+    try:
+        info = resolve_course_from_url(url, force=True)
+        return jsonify({"success": True, "course": info})
+    except Exception as e:
+        logger.exception(f"redetect failed for {course_id}")
+        return jsonify({"error": str(e)}), 400
 
 
 @app.route("/api/courses/<course_id>", methods=["DELETE"])

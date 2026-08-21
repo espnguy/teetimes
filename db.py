@@ -96,6 +96,9 @@ def init_db():
                 "ALTER TABLE courses ADD COLUMN IF NOT EXISTS booking_classes JSONB DEFAULT '[]'",
                 "ALTER TABLE courses ADD COLUMN IF NOT EXISTS online_open_time TEXT DEFAULT ''",
                 "ALTER TABLE courses ADD COLUMN IF NOT EXISTS timezone TEXT DEFAULT ''",
+                # Which resolver wrote this row. Rows from an older resolver are
+                # re-detected on next use — see course_resolver.RESOLVER_VERSION.
+                "ALTER TABLE courses ADD COLUMN IF NOT EXISTS resolver_version INTEGER DEFAULT 0",
             ]
             for sql in migrations:
                 try:
@@ -186,8 +189,8 @@ def save_course(course_id: str, info: dict):
                 cur.execute("""
                     INSERT INTO courses (course_id, schedule_id, booking_class, name, url,
                                          platform, be_alias, booking_classes,
-                                         online_open_time, timezone)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                         online_open_time, timezone, resolver_version)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (course_id) DO UPDATE SET
                         schedule_id      = EXCLUDED.schedule_id,
                         booking_class    = EXCLUDED.booking_class,
@@ -197,7 +200,8 @@ def save_course(course_id: str, info: dict):
                         be_alias         = EXCLUDED.be_alias,
                         booking_classes  = EXCLUDED.booking_classes,
                         online_open_time = EXCLUDED.online_open_time,
-                        timezone         = EXCLUDED.timezone
+                        timezone         = EXCLUDED.timezone,
+                        resolver_version = EXCLUDED.resolver_version
                 """, (
                     course_id,
                     info["schedule_id"],
@@ -209,6 +213,7 @@ def save_course(course_id: str, info: dict):
                     json.dumps(info.get("booking_classes", [])),
                     info.get("online_open_time", ""),
                     info.get("timezone", ""),
+                    int(info.get("resolver_version", 0)),
                 ))
         logger.info(f"Saved course {course_id}: {info['name']} (platform={info.get('platform','foreup')})")
     except Exception as e:

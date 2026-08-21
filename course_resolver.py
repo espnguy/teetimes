@@ -20,6 +20,12 @@ logger = logging.getLogger(__name__)
 
 BASE = "https://foreupsoftware.com"
 
+# Bump when resolution changes in a way that makes previously saved rows wrong.
+#   1 → original
+#   2 → parses ForeUp's booking_classes array (older rows stored booking_class =
+#       schedule_id, which ForeUp rejects), and captures online_open_time/timezone
+RESOLVER_VERSION = 2
+
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -57,22 +63,38 @@ def detect_platform(url: str) -> str:
     return "unknown"
 
 
-def resolve_course_from_url(url: str) -> dict:
+def _is_current(saved: dict) -> bool:
+    """
+    Is a saved course row still trustworthy?
+
+    Rows written before RESOLVER_VERSION 2 stored booking_class = schedule_id,
+    which ForeUp rejects outright, and carry no online_open_time/timezone. The
+    cache would otherwise shield those bad values forever.
+    """
+    try:
+        return int(saved.get("resolver_version") or 0) >= RESOLVER_VERSION
+    except (TypeError, ValueError):
+        return False
+
+
+def resolve_course_from_url(url: str, force: bool = False) -> dict:
     """
     Given a booking URL (ForeUp or GolfNow/TeeItUp), return:
       {course_id, schedule_id, booking_class, name, url, platform}
 
     Strategy:
       1. Detect platform
-      2. Check saved courses first
+      2. Reuse a saved course, unless it predates the current resolver
       3. Parse IDs from the URL
       4. Fetch the page and scrape config if needed
+
+    `force` re-detects even a current row, for the dashboard's re-detect button.
     """
     platform = detect_platform(url)
     clean_url = url.split("#")[0].rstrip("/")
 
     if platform in ("teeitup", "golfnow"):
-        return _resolve_golfnow(clean_url, platform)
+        return _resolve_golfnow(clean_url, platform, force=force)
 
     # Unknown — fetch the page and look for embedded booking platform links
     if platform == "unknown":
@@ -96,24 +118,25 @@ def resolve_course_from_url(url: str) -> dict:
     except Exception as e:
         raise ValueError(str(e))
 
-    # Step 2 — check saved courses
+    # Step 2 — check saved courses, unless the row predates the current resolver
     courses = db.load_courses()
-    if course_id in courses:
+    if course_id in courses and not force:
         saved = courses[course_id]
-        logger.info(f"Using saved course {course_id}: {saved.get('name')}")
-        return saved
+        if _is_current(saved):
+            logger.info(f"Using saved course {course_id}: {saved.get('name')}")
+            return saved
+        logger.info(
+            f"Saved course {course_id} was written by resolver v"
+            f"{saved.get('resolver_version', 0)} (current v{RESOLVER_VERSION}) — "
+            f"re-detecting."
+        )
 
-    # Step 3 — if URL already has schedule_id and booking_class, use them
-    if basic.get("schedule_id") and basic.get("booking_class"):
-        result = {
-            "course_id": course_id,
-            "schedule_id": basic["schedule_id"],
-            "booking_class": basic["booking_class"],
-            "name": f"Course {course_id}",
-            "url": f"{BASE}/index.php/booking/{course_id}",
-        }
-        save_course(course_id, result)
-        return result
+    # Step 3 — IDs supplied directly in the URL (e.g. pasted from DevTools) win
+    # over anything scraped, but we still fetch the page below for the course
+    # name, release time, and timezone. Short-circuiting here would produce a
+    # row that cannot support snipe mode.
+    url_schedule_id   = basic.get("schedule_id") if basic.get("booking_class") else None
+    url_booking_class = basic.get("booking_class")
 
     # Step 4 — fetch the booking page and scrape the config
     booking_url = f"{BASE}/index.php/booking/{course_id}"
@@ -147,6 +170,12 @@ def resolve_course_from_url(url: str) -> dict:
         schedule_id = booking_classes[0]["teesheet_id"]
 
     booking_class = _pick_booking_class(course_id, schedule_id, booking_classes)
+
+    # IDs the caller supplied in the URL are explicit intent — honour them.
+    if url_schedule_id:
+        schedule_id = url_schedule_id
+    if url_booking_class:
+        booking_class = url_booking_class
 
     # Try to get the course name from the page title
     name_match = re.search(r'<title>([^<]+)</title>', html, re.IGNORECASE)
@@ -183,6 +212,7 @@ def resolve_course_from_url(url: str) -> dict:
         "booking_classes": booking_classes,
         "online_open_time": _open_time_for(booking_classes, booking_class),
         "timezone": _extract_timezone(html),
+        "resolver_version": RESOLVER_VERSION,
     }
 
     save_course(course_id, result)
@@ -334,7 +364,7 @@ def _detect_from_page(url: str) -> dict:
     return None
 
 
-def _resolve_golfnow(url: str, platform: str) -> dict:
+def _resolve_golfnow(url: str, platform: str, force: bool = False) -> dict:
     """Resolve a GolfNow/TeeItUp course URL."""
     from golfnow_client import parse_golfnow_url
     info = parse_golfnow_url(url)
@@ -342,10 +372,12 @@ def _resolve_golfnow(url: str, platform: str) -> dict:
 
     # Check saved courses
     courses = db.load_courses()
-    if facility_id in courses:
+    if facility_id in courses and not force:
         saved = courses[facility_id]
-        logger.info(f"Using saved GolfNow course {facility_id}: {saved.get('name')}")
-        return saved
+        if _is_current(saved):
+            logger.info(f"Using saved GolfNow course {facility_id}: {saved.get('name')}")
+            return saved
+        logger.info(f"Saved GolfNow course {facility_id} is stale — re-detecting.")
 
     # Try to get the course name from the URL itself first
     from urllib.parse import urlparse as _urlparse
@@ -413,6 +445,7 @@ def _resolve_golfnow(url: str, platform: str) -> dict:
         "url":           url,
         "platform":      platform,
         "be_alias":      be_alias,      # subdomain slug for X-Be-Alias header
+        "resolver_version": RESOLVER_VERSION,
     }
     db.save_course(kenna_id, result)
     logger.info(f"Saved GolfNow course {kenna_id}: {name} (alias={be_alias})")

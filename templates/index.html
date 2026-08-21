@@ -439,11 +439,18 @@
               <div class="job-title">{{ c.name }}</div>
               <div class="job-meta">
                 Course ID: {{ cid }} · Schedule ID: {{ c.schedule_id }} · Booking Class: {{ c.booking_class }}
+                {% if c.online_open_time %} · Opens {{ c.online_open_time }} {{ c.timezone }}{% endif %}
               </div>
+              {% if not c.resolver_version or c.resolver_version < 2 %}
+              <div class="job-meta" style="color:#92400e;font-size:.75rem">
+                ⚠️ Saved by an older version — will be re-detected automatically on next use.
+              </div>
+              {% endif %}
               <div class="job-meta" style="font-size:.75rem">{{ c.url }}</div>
             </div>
             <div class="job-actions">
               <button class="btn btn-outline btn-sm" onclick="useCourse('{{ cid }}', '{{ c.url }}')">Use</button>
+              <button class="btn btn-outline btn-sm" onclick="redetectCourse('{{ cid }}')">↻</button>
               <button class="btn btn-danger btn-sm" onclick="deleteCourse('{{ cid }}')">✕</button>
             </div>
           </div>
@@ -648,6 +655,20 @@ async function saveManualCourse() {
     document.getElementById('manualOverride').style.display = 'none';
     loadSavedCourses();
     toast('Course saved! ⛳', 'success');
+  }
+}
+
+async function redetectCourse(courseId) {
+  toast('Re-detecting course…', 'success');
+  try {
+    const res  = await fetch(`/api/courses/${courseId}/redetect`, { method: 'POST' });
+    const data = await res.json();
+    if (data.error) { toast('Re-detect failed: ' + data.error, 'error'); return; }
+    const c = data.course;
+    toast(`${c.name} → class ${c.booking_class}, schedule ${c.schedule_id}`, 'success');
+    setTimeout(() => location.reload(), 1200);
+  } catch(e) {
+    toast('Re-detect failed: ' + e.message, 'error');
   }
 }
 

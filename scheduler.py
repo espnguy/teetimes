@@ -7,7 +7,7 @@ import logging
 import threading
 import time
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from foreup_client import ForeUpClient, parse_course_url
 from notifier import notify_times_available
 import db
@@ -26,6 +26,14 @@ SNIPE_LEAD_SECONDS   = 20     # start bursting this long before the release
 SNIPE_BURST_INTERVAL = 0.25   # ~4 requests/sec while the window is open
 SNIPE_WINDOW_SECONDS = 120    # give up this long after the release
 
+# Keeping a won hold alive. ForeUp holds a slot for 5 minutes and the booking
+# page refreshes yours while you are in checkout; doing the same means a 6am
+# alert does not have to be answered within five minutes. Capped, because a held
+# slot is a slot nobody else can take — this is a booking you intend to make,
+# not a parking space.
+HOLD_KEEPALIVE_INTERVAL = 60
+HOLD_MAX_MINUTES        = int(os.environ.get("HOLD_MAX_MINUTES", 15))
+
 
 class TeeTimeScheduler:
     def __init__(self):
@@ -33,6 +41,7 @@ class TeeTimeScheduler:
         self._running = False
         self._next_poll = {}      # job_id -> monotonic deadline
         self._snipe_threads = {}  # job_id -> live burst thread
+        self._hold_threads = {}   # job_id -> live hold keep-alive thread
 
     def start(self):
         if self._running:
@@ -213,6 +222,14 @@ class TeeTimeScheduler:
             cfg = db.load_config()
             client = self._client_for(job, cfg)
 
+            # Establish the session now, not on the first hold — that fetch cost
+            # ~900ms when measured, which is the whole race.
+            if hasattr(client, "prewarm"):
+                try:
+                    client.prewarm(job["course_id"])
+                except Exception as e:
+                    self._log(job_id, f"⚠️ Could not pre-warm session: {e}")
+
             self._log(job_id,
                 f"🎯 Release window open — burst-polling every "
                 f"{SNIPE_BURST_INTERVAL}s until {int(SNIPE_WINDOW_SECONDS)}s past release.")
@@ -247,24 +264,114 @@ class TeeTimeScheduler:
         finally:
             self._snipe_threads.pop(job_id, None)
 
+    def _keep_hold_alive(self, job_id: str, reservation_id: str, client):
+        """
+        Refresh a won hold until it is confirmed, released, or capped.
+
+        Exits as soon as the job's hold is marked released, so the dashboard's
+        release button takes effect promptly.
+        """
+        deadline = time.time() + HOLD_MAX_MINUTES * 60
+        refreshes = 0
+        try:
+            while self._running and time.time() < deadline:
+                time.sleep(HOLD_KEEPALIVE_INTERVAL)
+
+                job = db.load_job(job_id)
+                if not job:
+                    return                      # job deleted
+                held = job.get("hold_result") or {}
+                if held.get("released") or held.get("reservation_id") != reservation_id:
+                    return                      # released, or superseded
+
+                if not client.refresh_hold(reservation_id):
+                    self._log(job_id,
+                        "🔓 Hold refresh was rejected — it has probably lapsed or "
+                        "been completed.")
+                    return
+                refreshes += 1
+
+            # Cap reached. Hand the slot back rather than sitting on it.
+            job = db.load_job(job_id)
+            held = (job or {}).get("hold_result") or {}
+            if held.get("reservation_id") == reservation_id and not held.get("released"):
+                client.release_hold(reservation_id)
+                db.update_job_fields(job_id, {"hold_result": {**held, "released": True}})
+                self._log(job_id,
+                    f"🔓 Hold released after {HOLD_MAX_MINUTES} min without "
+                    f"confirmation ({refreshes} refreshes). The time is back on "
+                    f"the sheet.")
+        except Exception as e:
+            logger.exception(f"Keep-alive failed for job {job_id}")
+            self._log(job_id, f"⚠️ Hold keep-alive stopped: {e}")
+        finally:
+            self._hold_threads.pop(job_id, None)
+
+    def release_hold(self, job_id: str) -> dict:
+        """Release a held slot on request from the dashboard."""
+        job = db.load_job(job_id)
+        if not job:
+            raise ValueError("Job not found")
+        held = job.get("hold_result") or {}
+        reservation_id = held.get("reservation_id")
+        if not reservation_id:
+            raise ValueError("This job has no hold to release")
+        if held.get("released"):
+            return held
+
+        client = self._client_for(job, db.load_config())
+        client.prewarm(job["course_id"])
+        client.release_hold(reservation_id)
+        # Clear any remaining arm too — releasing means "I don't want this slot",
+        # so the sniper must not immediately grab it back.
+        updated = {**held, "released": True}
+        db.update_job_fields(job_id, {
+            "hold_result": updated, "status": "polling", "snipe_at": None})
+        self._log(job_id, f"🔓 Hold {reservation_id} released manually.")
+        return updated
+
     def _handle_snipe_hit(self, job: dict, times: list, cfg: dict, client):
         """Times appeared during the release window — try to hold, then notify."""
         job_id = job["id"]
+        # Disarm before doing anything else. The release window stays "burst" for
+        # up to SNIPE_WINDOW_SECONDS after a hit, and without this the poll loop
+        # re-enters and places another hold on the same tee sheet every pass.
         db.update_job_fields(job_id, {
             "status":          "available",
             "available_times": times,
             "last_polled":     datetime.now(),
+            "snipe_at":        None,
         })
 
         hold = None
         if job.get("platform", "foreup") == "foreup":
             best = times[0]   # earliest slot inside the requested window
             try:
-                hold = client.hold(best, players=job["players"], holes=job.get("holes", 18))
+                t0 = time.time()
+                raw = client.hold(best, players=job["players"], holes=job.get("holes", 18))
+                ms = (time.time() - t0) * 1000
+                reservation_id = raw.get("reservation_id") or raw.get("id")
+                hold = {
+                    "reservation_id": reservation_id,
+                    "time":           best.get("time"),
+                    "green_fee":      best.get("green_fee"),
+                    "players":        job["players"],
+                    "held_at":        datetime.now(timezone.utc).isoformat(),
+                    "expires_at":     (datetime.now(timezone.utc)
+                                       + timedelta(minutes=HOLD_MAX_MINUTES)).isoformat(),
+                    "released":       False,
+                    "raw":            raw,
+                }
                 db.update_job_fields(job_id, {"hold_result": hold})
                 self._log(job_id,
-                    f"🔒 Held {best.get('time')} for {job['players']} — "
-                    f"confirm in the browser before it lapses.")
+                    f"🔒 HELD {best.get('time')} for {job['players']} in {ms:.0f}ms "
+                    f"(reservation {reservation_id}). Keeping it alive for up to "
+                    f"{HOLD_MAX_MINUTES} min — confirm in the browser.")
+                if reservation_id:
+                    t = threading.Thread(target=self._keep_hold_alive,
+                                         args=(job_id, reservation_id, client), daemon=True)
+                    self._hold_threads[job_id] = t
+                    t.start()
             except PermissionError as e:
                 self._log(job_id, f"🔓 Could not hold (booking class restricted): {e}")
             except Exception as e:

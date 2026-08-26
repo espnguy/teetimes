@@ -60,12 +60,45 @@ Tick **Snipe at release** when adding a watch and the app will:
    click a time.
 4. Send a **priority-2 Pushover alert** that re-nags every 30s for 5 minutes.
 
+Once the hold lands it is kept alive with `refresh_pending_reservation`, the same
+call the booking page makes while you are in checkout. ForeUp's own limit is 5
+minutes; the keep-alive extends that to `HOLD_MAX_MINUTES` (default 15), then
+releases the slot automatically. There is a **Release** button on the job card,
+and releasing also disarms the sniper so it does not immediately grab it back.
+
 > **A hold is not a booking.** Nothing is charged and the round is not confirmed
-> until you complete checkout in the browser. Holds lapse after a few minutes.
->
-> A booking class with `block_online_booking` set cannot complete an online
-> booking at all — the hold will be refused and the job falls back to a fast
-> notification. The job log records exactly what the course said.
+> until you complete checkout in the browser.
+
+### Why it stops short of booking
+
+The final submit is captcha-gated, and this app will not defeat that:
+
+```js
+if (view.model.get("captchaid") || !SETTINGS.enable_captcha_online) {
+    view.createBooking(...)      // needs a reCAPTCHA token
+}
+```
+
+Grapevine has `enable_captcha_online = "1"`, so the last tap is yours.
+
+That turns out not to matter much, because **the race is won at the hold, not the
+submit** — `force-recaptcha-on-tile-click` is disabled, so claiming the slot needs
+no captcha and, at Grapevine, no login either. Whoever holds it first owns it;
+everyone else gets a spinning wheel. Confirmed against the live API:
+
+```
+POST /index.php/api/booking/pending_reservation   (form-encoded)
+  → {"success": true, "reservation_id": "TTID_...."}
+DELETE /index.php/api/booking/pending_reservation/{id}
+  → {"success": true}
+```
+
+The payload must be **form-encoded** and carry exactly the 16 fields ForeUp's own
+bundle picks — including the price fields. JSON, or a partial payload, returns a
+bare HTTP 500 with an empty body. See `HOLD_FIELDS` in `foreup_client.py`.
+
+Use `python probe_hold.py --date MM-DD-YYYY` to re-verify against a live course.
+It holds the last slot of the day and releases it immediately.
 
 ---
 
@@ -148,6 +181,8 @@ teetime-booker/
 ├── notifier.py          ← Pushover push notifications
 ├── devserver.py         ← Runs the dashboard with an in-memory DB (local UI work)
 ├── test_snipe.py        ← Exercises the burst engine against a simulated release
+├── test_hold.py         ← Hold lifecycle: win, keep alive, release, cap
+├── probe_hold.py        ← One-shot live check that holding still works
 ├── templates/
 │   └── index.html       ← Single-page dashboard UI
 ├── requirements.txt
@@ -155,7 +190,7 @@ teetime-booker/
 └── README.md
 ```
 
-Run `python test_snipe.py` to verify the snipe engine — it fakes a sheet opening
+Run `python test_snipe.py` and `python test_hold.py` to verify the snipe engine — it fakes a sheet opening
 mid-burst and asserts the hold and notification both fire. Worth running after
 any scheduler change, since the real thing only executes once a week.
 

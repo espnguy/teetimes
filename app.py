@@ -227,6 +227,19 @@ def add_job():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/jobs/<job_id>/release_hold", methods=["POST"])
+def release_hold(job_id):
+    """Give a held tee time back to the sheet."""
+    try:
+        held = scheduler.release_hold(job_id)
+        return jsonify({"success": True, "hold": held})
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 404
+    except Exception as e:
+        logger.exception(f"release_hold failed for {job_id}")
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/remove_job/<job_id>", methods=["DELETE"])
 def remove_job(job_id):
     scheduler.remove_job(job_id)

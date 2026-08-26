@@ -252,24 +252,15 @@ class ForeUpClient:
         """
         self._ensure_logged_in(str(slot.get("course_id") or self._course_id))
 
-        payload = {
-            "time":              slot.get("time"),
-            "holes":             holes,
-            "players":           players,
-            "carts":             0,
-            "schedule_id":       slot.get("schedule_id"),
-            "teesheet_id":       slot.get("teesheet_id") or slot.get("schedule_id"),
-            "course_id":         slot.get("course_id"),
-            "booking_class_id":  slot.get("booking_class_id"),
-            "teesheet_side_id":  slot.get("teesheet_side_id"),
-            "duration":          1,
-            "pay_online":        slot.get("pay_online", "no"),
-        }
-        payload = {k: v for k, v in payload.items() if v is not None}
+        payload = build_hold_payload(slot, players, holes)
+        logger.info(f"Hold payload: {payload}")
 
+        # ForeUp's own client form-encodes this (jQuery `data: params`). Sending
+        # JSON gets a bare HTTP 500 with an empty body.
         resp = self.session.post(
             f"{BASE}/index.php/api/booking/pending_reservation",
-            json=payload,
+            data=payload,
+            headers={"Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"},
             timeout=15,
         )
 
@@ -293,6 +284,49 @@ class ForeUpClient:
         logger.info(f"Hold placed on {slot.get('time')}: {str(data)[:200]}")
         return data if isinstance(data, dict) else {"response": data}
 
+    def refresh_hold(self, reservation_id: str) -> bool:
+        """
+        Push a pending reservation's expiry back out.
+
+        ForeUp holds a slot for HOLD_SECONDS; the booking page keeps yours alive
+        while you are in checkout by POSTing here (no body). Doing the same lets
+        a sniped time survive longer than five minutes, so you are not forced to
+        confirm within seconds of the alert.
+        """
+        resp = self.session.post(
+            f"{BASE}/index.php/api/booking/refresh_pending_reservation/{reservation_id}",
+            timeout=15,
+        )
+        if not resp.ok:
+            logger.warning(
+                f"Hold refresh failed for {reservation_id}: HTTP {resp.status_code}")
+            return False
+        return True
+
+    def release_hold(self, reservation_id: str) -> bool:
+        """Give a held slot back, so it returns to the tee sheet immediately."""
+        resp = self.session.delete(
+            f"{BASE}/index.php/api/booking/pending_reservation/{reservation_id}",
+            headers={"Content-Type": "application/json"},
+            timeout=15,
+        )
+        if resp.ok:
+            logger.info(f"Released hold {reservation_id}")
+            return True
+        logger.warning(
+            f"Could not release hold {reservation_id}: HTTP {resp.status_code} "
+            f"— it will lapse on its own within {HOLD_SECONDS // 60} minutes.")
+        return False
+
+    def prewarm(self, course_id: str):
+        """
+        Establish the PHPSESSID ahead of a release window.
+
+        Without this the first hold pays for a full booking-page fetch, which
+        measured ~900ms of the 1.1s round trip — long enough to lose the race.
+        """
+        self._ensure_logged_in(str(course_id))
+
     @staticmethod
     def booking_url(course_id: str, date: str, players: int = 2) -> str:
         """
@@ -306,6 +340,55 @@ class ForeUpClient:
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+# Exactly the fields ForeUp's online-booking bundle picks off the tee time when
+# it creates a pending reservation:
+#   params = _.pick(attributes, [...])   →   $.ajax({type:'POST', data: params})
+# Sending anything else (or sending JSON) returns a bare HTTP 500.
+HOLD_FIELDS = (
+    "time", "holes", "players", "carts", "schedule_id", "teesheet_side_id",
+    "course_id", "booking_class_id", "duration", "foreup_discount",
+    "foreup_trade_discount_rate", "trade_min_players", "cart_fee",
+    "cart_fee_tax", "green_fee", "green_fee_tax",
+)
+
+# How long ForeUp holds a pending reservation, from the booking bundle's
+# PendingReservation.time_limit. Refreshable via refresh_pending_reservation.
+HOLD_SECONDS = 300
+
+
+def _jq(value):
+    """
+    Encode a value the way jQuery's $.param would, so the payload matches what
+    ForeUp's server expects. Python would render booleans as "True"/"False",
+    which PHP reads as non-empty (truthy) strings.
+    """
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return value
+
+
+def build_hold_payload(slot: dict, players: int, holes: int = 18,
+                       carts: int = 0, duration: int = 1) -> dict:
+    """
+    Build the pending_reservation body from a raw tee time slot.
+
+    The slot straight from fetch_tee_times already carries every id and price
+    ForeUp wants; players/holes/carts/duration come from the job.
+    """
+    source = dict(slot)
+    source.update({
+        "players":  players,
+        "holes":    holes,
+        "carts":    carts,
+        "duration": duration,
+    })
+    return {
+        field: _jq(source[field])
+        for field in HOLD_FIELDS
+        if source.get(field) is not None
+    }
+
 
 def _parse_times_response(resp: requests.Response, booking_class: str, schedule_id: str) -> list:
     """

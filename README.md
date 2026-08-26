@@ -55,19 +55,48 @@ Tick **Snipe at release** when adding a watch and the app will:
    handled — 11:00 UTC in summer, 12:00 in winter).
 2. Burst-poll **4×/sec starting 20s before** release, on a dedicated thread
    reusing one HTTP session. Detection lands within ~250ms of the sheet opening.
-3. Attempt a **hold** on the earliest matching slot via ForeUp's
-   `pending_reservation` endpoint — the same call the booking page makes when you
-   click a time.
-4. Send a **priority-2 Pushover alert** that re-nags every 30s for 5 minutes.
+3. Send a **priority-2 Pushover alert** the moment anything matches, re-nagging
+   every 30s for 5 minutes.
 
-Once the hold lands it is kept alive with `refresh_pending_reservation`, the same
-call the booking page makes while you are in checkout. ForeUp's own limit is 5
-minutes; the keep-alive extends that to `HOLD_MAX_MINUTES` (default 15), then
-releases the slot automatically. There is a **Release** button on the job card,
-and releasing also disarms the sniper so it does not immediately grab it back.
+It does not place a hold — see below for why it cannot.
 
-> **A hold is not a booking.** Nothing is charged and the round is not confirmed
-> until you complete checkout in the browser.
+### The hold has to happen in your browser, not here
+
+Winning the race means claiming the slot before anyone else — ForeUp's
+`pending_reservation`, the "cart". That call is **not** captcha-gated and needs no
+login. But a pending reservation is scoped to the **session that created it**,
+and that turns out to be decisive. Verified live:
+
+```
+[A] holds 18:15                       -> {"success":true,"reservation_id":"TTID_..."}
+[B] (a different session) sees        -> SLOT GONE
+[B] tries to hold the same slot       -> {"success":false,
+                                          "message":"Sorry, that tee time is
+                                                     no longer available."}
+```
+
+Session B is your phone. A hold placed by this server is invisible to you — it
+does not appear in your cart even when the server logs in as your own ForeUp
+account, which was tested directly. So the server holding a slot would take it
+off the sheet for everyone **including you**. That is why nothing here ever
+places a hold.
+
+Instead the dashboard hands you a **browser sniper**: a self-contained script you
+paste into the console on the ForeUp booking page. It runs in your tab, with your
+cookies, so the hold it creates is genuinely yours — it writes the reservation
+into `localStorage` exactly where ForeUp's own code looks for it, then reloads so
+the booking modal shows the countdown. You confirm through the captcha as normal.
+
+It is self-contained because a script served from this app and fetched
+cross-origin would be blocked by CORS. `sniper.py` generates it per watch, with
+the date, window, player count, and release time baked in.
+
+So there are two halves, and they are good at different things:
+
+| | runs where | good for |
+|---|---|---|
+| **Server snipe** | Railway, unattended | detecting the release ~250ms in and pushing an alert; works while you sleep |
+| **Browser sniper** | your own tab | actually claiming the slot; needs a browser open at 6am |
 
 ### Why it stops short of booking
 
@@ -79,26 +108,14 @@ if (view.model.get("captchaid") || !SETTINGS.enable_captcha_online) {
 }
 ```
 
-Grapevine has `enable_captcha_online = "1"`, so the last tap is yours.
+Grapevine has `enable_captcha_online = "1"`, so the last tap is yours either way.
 
-That turns out not to matter much, because **the race is won at the hold, not the
-submit** — `force-recaptcha-on-tile-click` is disabled, so claiming the slot needs
-no captcha and, at Grapevine, no login either. Whoever holds it first owns it;
-everyone else gets a spinning wheel. Confirmed against the live API:
+The hold payload must be **form-encoded** and carry exactly the 16 fields ForeUp's
+own bundle picks — including the price fields. JSON, or a partial payload, returns
+a bare HTTP 500 with an empty body. See `HOLD_FIELDS` in `foreup_client.py`;
+`test_sniper.py` asserts the browser script and the Python client stay in sync.
 
-```
-POST /index.php/api/booking/pending_reservation   (form-encoded)
-  → {"success": true, "reservation_id": "TTID_...."}
-DELETE /index.php/api/booking/pending_reservation/{id}
-  → {"success": true}
-```
-
-The payload must be **form-encoded** and carry exactly the 16 fields ForeUp's own
-bundle picks — including the price fields. JSON, or a partial payload, returns a
-bare HTTP 500 with an empty body. See `HOLD_FIELDS` in `foreup_client.py`.
-
-Use `python probe_hold.py --date MM-DD-YYYY` to re-verify against a live course.
-It holds the last slot of the day and releases it immediately.
+`python probe_hold.py --handoff` re-runs the session-scoping experiment above.
 
 ---
 
@@ -131,7 +148,8 @@ URL directly.
 - 🏌️ **Saved course library** — set up a course once, reuse with one click
 - 🔍 **Auto-detects course IDs** — paste any booking URL and IDs are scraped automatically
 - 🌐 **Multi-platform** — ForeUp and GolfNow confirmed, TeeItUp with manual setup
-- 🎯 **Snipe mode** — burst-polls the instant a sheet opens and tries to hold a slot
+- 🎯 **Snipe mode** — burst-polls the instant a sheet opens, alerting in ~250ms
+- 🖥️ **Browser sniper** — claims the slot from your own session, where holds actually work
 - 🔎 **Zip-code discovery** — find nearby courses and see which are supported
 
 ---
@@ -181,7 +199,8 @@ teetime-booker/
 ├── notifier.py          ← Pushover push notifications
 ├── devserver.py         ← Runs the dashboard with an in-memory DB (local UI work)
 ├── test_snipe.py        ← Exercises the burst engine against a simulated release
-├── test_hold.py         ← Hold lifecycle: win, keep alive, release, cap
+├── sniper.py            ← Generates the in-browser sniper for a watch
+├── test_sniper.py       ← Keeps the browser script and the client in sync
 ├── probe_hold.py        ← One-shot live check that holding still works
 ├── templates/
 │   └── index.html       ← Single-page dashboard UI
@@ -190,7 +209,7 @@ teetime-booker/
 └── README.md
 ```
 
-Run `python test_snipe.py` and `python test_hold.py` to verify the snipe engine — it fakes a sheet opening
+Run `python test_snipe.py` and `python test_sniper.py` to verify the snipe engine — it fakes a sheet opening
 mid-burst and asserts the hold and notification both fire. Worth running after
 any scheduler change, since the real thing only executes once a week.
 

@@ -76,14 +76,14 @@ def notify_times_available(
     job: dict,
     times: list,
     dashboard_url: str = "",
-    held: bool = False,
+    urgent: bool = False,
 ) -> bool:
     """
     Send a tee time alert with a direct link to the booking page.
 
-    `held` means a pending reservation was placed on the earliest slot — the
-    round is not booked, but it is reserved for a few minutes pending checkout,
-    so the message needs to convey urgency.
+    `urgent` marks a sheet that just opened at its release moment, where the
+    good times will be gone in under a minute — so the alert escalates to
+    Pushover's emergency priority and keeps nagging until acknowledged.
     """
     date      = job.get("target_date", "?")
     time_from = job.get("time_from", "?")
@@ -111,9 +111,9 @@ def notify_times_available(
     except Exception:
         pretty_date = date
 
-    if held:
-        title = f"🔒 HELD {_fmt_time(times[0].get('time'))} — {pretty_date}"
-        footer = "⚠️ On hold for a few minutes only — tap to confirm NOW."
+    if urgent:
+        title = f"🔥 SHEET OPEN — {count} time{'s' if count > 1 else ''} {pretty_date}"
+        footer = "⚠️ Just released — book NOW, these go in under a minute."
     else:
         title = f"⛳ {count} Tee Time{'s' if count > 1 else ''} — {pretty_date}"
         footer = f"Open the booking page → {pretty_date}"
@@ -141,8 +141,8 @@ def notify_times_available(
         title=title,
         message=message,
         url=booking_url,
-        url_title="Confirm hold →" if held else "Open booking page →",
-        priority=2 if held else 1,
+        url_title="Book now →" if urgent else "Open booking page →",
+        priority=2 if urgent else 1,
     )
 
 

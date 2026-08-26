@@ -41,12 +41,11 @@ class FakeClient:
         return [{"time": "2026-08-30 07:12", "green_fee": 60.4, "available_spots": 4,
                  "course_id": 19536, "schedule_id": 1832, "teesheet_id": 1832,
                  "booking_class_id": 12800, "teesheet_side_id": 1465}]
-    def hold(self, slot, players, holes=18):
-        return {"reservation_id": "TEST123", "time": slot["time"]}
+    def prewarm(self, course_id): pass
 
 S.TeeTimeScheduler._client_for = staticmethod(lambda job, cfg: FakeClient())
 S.notify_times_available = lambda **kw: (
-    LOGS.append(f"NOTIFY held={kw.get('held')} n={len(kw['times'])}") or True)
+    LOGS.append(f"NOTIFY urgent={kw.get('urgent')} n={len(kw['times'])}") or True)
 
 STATE.update({
     "id": "test1", "status": "polling", "platform": "foreup",
@@ -64,7 +63,7 @@ sch.start()
 
 deadline = time.time() + 14
 while time.time() < deadline:
-    if STATE.get("status") == "available" and STATE.get("hold_result"):
+    if STATE.get("status") == "available":
         break
     time.sleep(0.1)
 sch.stop(); time.sleep(0.3)
@@ -77,7 +76,6 @@ print("--- job log ---")
 for l in LOGS: print("  ", l)
 print("\n--- results ---")
 print("status      :", STATE.get("status"))
-print("hold_result :", STATE.get("hold_result"))
 print("attempts    :", attempts["n"])
 print("times found :", len(STATE.get("available_times") or []))
 
@@ -87,7 +85,8 @@ for l in LOGS:
         lag = time.time() - OPEN_AT
 print("detect lag  : ~%.2fs after release" % (lag if lag else -1))
 assert STATE["status"] == "available", "should have flipped to available"
-assert STATE["hold_result"]["reservation_id"] == "TEST123", "hold should be recorded"
-assert any("NOTIFY held=True" in l for l in LOGS), "should notify with held=True"
+assert STATE.get("hold_result") is None, "the server must never place a hold"
+assert any("NOTIFY urgent=True" in l for l in LOGS), "should notify at emergency priority"
+assert STATE.get("snipe_at") is None, "snipe should disarm after a hit"
 assert attempts["n"] > 20, f"should have burst-polled many times, got {attempts['n']}"
 print("\nPASS")

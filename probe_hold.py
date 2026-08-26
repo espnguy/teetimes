@@ -45,7 +45,18 @@ def main() -> int:
     ap.add_argument("--login", action="store_true",
                     help="log in with FOREUP_EMAIL / FOREUP_PASSWORD first")
     ap.add_argument("--players", type=int, default=2)
+    ap.add_argument("--handoff", action="store_true",
+                    help="test whether a hold made by THIS session blocks a "
+                         "different session (i.e. your phone)")
+    ap.add_argument("--hold-open", action="store_true",
+                    help="hold a slot and KEEP it while you check your phone, "
+                         "then release on Enter. Use with --login.")
     args = ap.parse_args()
+
+    if args.handoff:
+        return handoff_test(args)
+    if args.hold_open:
+        return hold_open_test(args)
 
     if args.login:
         email = os.environ.get("FOREUP_EMAIL", "")
@@ -126,6 +137,183 @@ def main() -> int:
             except Exception as e:
                 print(f"   !! RELEASE FAILED: {e}")
                 _manual_cleanup(res_id)
+
+    print("\nPaste this whole output into the chat.")
+    return 0
+
+
+def hold_open_test(args) -> int:
+    """
+    Hold a slot and keep it alive while you go look at ForeUp on another device.
+
+    This is the test the automated handoff probe cannot do: whether a hold placed
+    by the server, WHILE LOGGED IN AS YOU, becomes visible or completable in your
+    own browser once you log in there. The course has
+    `multiple-user-accounts-and-pending-reservations` enabled, which is the only
+    reason to expect it might.
+
+    Releases on Enter, and refreshes in the background so it does not lapse while
+    you look.
+    """
+    import threading
+
+    if args.login:
+        email = os.environ.get("FOREUP_EMAIL", "")
+        password = os.environ.get("FOREUP_PASSWORD", "")
+        if not email or not password:
+            print("--hold-open --login needs FOREUP_EMAIL / FOREUP_PASSWORD set.")
+            return 2
+        client = fc.ForeUpClient(email, password)
+        print(f"Logging in as {email} …")
+        client.login(COURSE_ID)
+        print("   logged in OK — the hold will belong to THIS account\n")
+    else:
+        client = fc.ForeUpClient()
+        print("Holding ANONYMOUSLY — you almost certainly want --login here,\n"
+              "since an anonymous hold has no account to hand off to.\n")
+
+    times = client.fetch_tee_times(
+        course_id=COURSE_ID, schedule_id=SCHEDULE_ID, date=args.date,
+        time_from="00:00", time_to="23:59", players=args.players,
+        booking_class=BOOKING_CLASS)
+    if not times:
+        print(f"No open times on {args.date}.")
+        return 1
+    slot = times[-1]
+    print(f"Slot: {slot['time']}   ${slot.get('green_fee')}   (LAST slot of the day)")
+
+    input("\nPress Enter to hold it (Ctrl+C to abort) … ")
+
+    res_id = None
+    stop = threading.Event()
+    try:
+        raw = client.hold(slot, players=args.players, holes=18)
+        res_id = raw.get("reservation_id")
+        print(f"\nHELD — reservation {res_id}")
+
+        def keep_warm():
+            while not stop.wait(60):
+                ok = client.refresh_hold(res_id)
+                print(f"   [keep-alive] refresh {'ok' if ok else 'REJECTED'}")
+        threading.Thread(target=keep_warm, daemon=True).start()
+
+        print(f"""
+NOW GO CHECK, while this stays held:
+
+  1. Open https://foreupsoftware.com/index.php/booking/{COURSE_ID}#/teetimes
+     on your phone or another browser.
+  2. Log in with the SAME ForeUp account.
+  3. Look for {slot['time']} on {args.date}.
+
+What do you see?
+  (a) the slot is gone / "no longer available"   -> handoff does NOT work
+  (b) a countdown or the time sitting in your cart -> handoff DOES work
+""")
+        input("Press Enter when you're done looking, to release the hold … ")
+    except Exception as e:
+        print(f"HOLD FAILED: {type(e).__name__}: {e}")
+    finally:
+        stop.set()
+        if res_id:
+            ok = client.release_hold(res_id)
+            print(f"\nReleased {res_id}: {'ok' if ok else 'FAILED'}")
+            if not ok:
+                _manual_cleanup(res_id)
+
+    print("\nPaste this output plus what you saw into the chat.")
+    return 0
+
+
+def _slot_view(client, date, players, want_time):
+    """What one session sees for a given tee time: spots, or gone entirely."""
+    times = client.fetch_tee_times(
+        course_id=COURSE_ID, schedule_id=SCHEDULE_ID, date=date,
+        time_from="00:00", time_to="23:59", players=players,
+        booking_class=BOOKING_CLASS)
+    for t in times:
+        if t.get("time") == want_time:
+            return t.get("available_spots")
+    return None      # not listed at all
+
+
+def handoff_test(args) -> int:
+    """
+    The question that decides whether snipe mode is useful at all:
+
+    the hold is created by the SERVER's ForeUp session. Your phone is a
+    different session. If ForeUp scopes a pending reservation to the session
+    that made it, then the server holding a slot makes it look taken to YOU —
+    the app would be blocking its own user, which is exactly the "in someone
+    else's cart" spinner we are trying to avoid.
+
+    Session A holds the last slot of the day. Session B — a completely fresh
+    client, standing in for your phone — then looks at the same tee sheet and
+    tries to hold the same slot. Both holds are released at the end.
+    """
+    a = fc.ForeUpClient()                     # "the server"
+    b = fc.ForeUpClient()                     # "your phone"
+
+    times = a.fetch_tee_times(
+        course_id=COURSE_ID, schedule_id=SCHEDULE_ID, date=args.date,
+        time_from="00:00", time_to="23:59", players=args.players,
+        booking_class=BOOKING_CLASS)
+    if not times:
+        print(f"No open times on {args.date}.")
+        return 1
+    slot = times[-1]
+    when = slot["time"]
+
+    print(f"Slot under test : {when}   ${slot.get('green_fee')}")
+    print(f"Spots before    : A sees {_slot_view(a, args.date, args.players, when)}, "
+          f"B sees {_slot_view(b, args.date, args.players, when)}")
+
+    input("\nPress Enter to run the handoff test (Ctrl+C to abort) … ")
+
+    a_id = b_id = None
+    try:
+        print("\n[A] placing hold …")
+        raw = a.hold(slot, players=args.players, holes=18)
+        a_id = raw.get("reservation_id")
+        print(f"[A] held, reservation {a_id}")
+
+        print(f"\n[A] sees {_slot_view(a, args.date, args.players, when)} spots after its own hold")
+        b_spots = _slot_view(b, args.date, args.players, when)
+        print(f"[B] sees {b_spots} spots  "
+              f"({'SLOT GONE' if b_spots is None else 'still listed'})")
+
+        print("\n[B] trying to hold the same slot (this is your phone clicking it) …")
+        try:
+            raw_b = b.hold(slot, players=args.players, holes=18)
+            b_id = raw_b.get("reservation_id")
+            print(f"[B] HOLD SUCCEEDED — reservation {b_id}")
+            print("    => holds do NOT block other sessions; the slot is still")
+            print("       grabbable by anyone, so holding does not win the race.")
+        except Exception as e:
+            print(f"[B] hold refused: {type(e).__name__}: {str(e)[:200]}")
+            print("    => the hold DOES lock the slot to session A.")
+            print("       Good news for the race, bad news for handoff: your phone")
+            print("       is session B and would see exactly this.")
+
+        print("\n[A] testing refresh (course has prevent-indefinite-pending-reservations ON) …")
+        for i in range(1, 4):
+            ok = a.refresh_hold(a_id) if a_id else False
+            print(f"    refresh {i}: {'ok' if ok else 'REJECTED'}")
+            if not ok:
+                break
+            time.sleep(2)
+    except Exception as e:
+        print(f"\nTEST ERROR: {type(e).__name__}: {e}")
+    finally:
+        for label, client, rid in (("A", a, a_id), ("B", b, b_id)):
+            if rid:
+                try:
+                    ok = client.release_hold(rid)
+                    print(f"\n[{label}] released {rid}: {'ok' if ok else 'FAILED'}")
+                    if not ok:
+                        _manual_cleanup(rid)
+                except Exception as e:
+                    print(f"[{label}] release failed: {e}")
+                    _manual_cleanup(rid)
 
     print("\nPaste this whole output into the chat.")
     return 0

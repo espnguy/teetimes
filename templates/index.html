@@ -879,47 +879,31 @@ async function refreshJobs() {
 // Auto-refresh every 30 seconds
 setInterval(refreshJobs, 30000);
 
-function renderHold(job) {
-  const h = job.hold_result;
-  if (!h || !h.reservation_id) return '';
-
-  if (h.released) {
-    return `<div style="margin-top:8px;background:#f1f5f9;border-radius:8px;
-                 padding:8px 12px;font-size:.82rem;color:#64748b">
-        🔓 Hold released — ${escHtml(h.time || '')} is back on the tee sheet.
-      </div>`;
-  }
-
-  const mins = h.expires_at
-    ? Math.max(0, Math.round((new Date(h.expires_at) - Date.now()) / 60000)) : null;
-  const bookUrl = `https://foreupsoftware.com/index.php/booking/${job.course_id}#/teetimes`;
-
-  return `<div style="margin-top:8px;background:#fef3c7;border:1px solid #fcd34d;
-               border-radius:8px;padding:10px 12px;font-size:.82rem;color:#92400e">
-      <div style="font-weight:700;margin-bottom:4px">
-        🔒 HELD ${escHtml(h.time || '')} for ${h.players} — not booked yet
+function renderSniper(job) {
+  if (job.platform && job.platform !== 'foreup') return '';
+  return `<div style="margin-top:8px;background:#f0f9ff;border:1px solid #bae6fd;
+               border-radius:8px;padding:10px 12px;font-size:.8rem;color:#0369a1">
+      <div style="font-weight:700;margin-bottom:3px">🖥️ Browser sniper</div>
+      <div style="margin-bottom:8px;color:#0c4a6e">
+        Holding a tee time only works from <b>your own browser session</b> — a hold
+        made by this server shows as unavailable to you. Paste this into the console
+        on the ForeUp booking page before the sheet opens and it grabs the slot for you.
       </div>
-      <div style="margin-bottom:8px">
-        Being kept alive${mins !== null ? ` for ~${mins} more min` : ''}. Confirm in the
-        browser to finish — the last step needs the course's reCAPTCHA, so it has to be you.
-      </div>
-      <a class="btn btn-confirm btn-sm" href="${bookUrl}" target="_blank" rel="noopener">
-        🏌️ Confirm booking →</a>
-      <button class="btn btn-outline btn-sm" onclick="releaseHold('${job.id}')">
-        Release</button>
+      <button class="btn btn-outline btn-sm" onclick="copySniper('${job.id}')">
+        📋 Copy sniper script</button>
     </div>`;
 }
 
-async function releaseHold(jobId) {
-  if (!confirm('Release this hold? The tee time goes back on the sheet immediately.')) return;
+async function copySniper(jobId) {
   try {
-    const res  = await fetch(`/api/jobs/${jobId}/release_hold`, { method: 'POST' });
+    const res  = await fetch(`/api/jobs/${jobId}/sniper`);
     const data = await res.json();
-    if (data.error) { toast('Release failed: ' + data.error, 'error'); return; }
-    toast('Hold released', 'success');
-    refreshJobs();
+    if (data.error) { toast(data.error, 'error'); return; }
+    await navigator.clipboard.writeText(data.script);
+    toast('Copied. Open the ForeUp booking page → F12 → Console → paste.', 'success');
+    window.open(data.booking_url, '_blank', 'noopener');
   } catch(e) {
-    toast('Release failed: ' + e.message, 'error');
+    toast('Could not copy: ' + e.message, 'error');
   }
 }
 
@@ -956,7 +940,7 @@ function renderJob(job) {
         <div class="job-meta" style="word-break:break-all;margin-top:2px;font-size:.75rem">
           ${job.course_url}
         </div>
-        ${renderHold(job)}
+        ${renderSniper(job)}
         ${job.booked_confirmation ? `
           <div style="margin-top:8px;background:var(--green-pale);border-radius:8px;
                       padding:8px 12px;font-size:.82rem;color:var(--green);font-weight:600">

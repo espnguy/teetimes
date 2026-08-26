@@ -20,6 +20,56 @@ needing any permission from foreupsoftware.com.
 import json
 
 
+def claim_js(reservation_id: str, phpsessid: str, slot: dict,
+             players: int, holes: int = 18) -> str:
+    """
+    Build the snippet that hands a server-side hold to the user's browser.
+
+    ForeUp's session cookie is not HttpOnly:
+
+        Set-Cookie: PHPSESSID=...; path=/; samesite=None; secure
+
+    so a script running on foreupsoftware.com can adopt the server's session.
+    ForeUp's own client tracks a pending reservation in localStorage rather than
+    asking the server for it, so the second half writes that entry in the exact
+    shape `PendingReservation.store()` uses — otherwise the booking modal treats
+    the slot as gone.
+
+    SECURITY: the session id is a credential. While the server is logged in it
+    grants access to that ForeUp account, so a claim snippet is short-lived and
+    should not be pasted anywhere public.
+    """
+    payload = {
+        "sid": phpsessid,
+        "res": {
+            "reservation": {**slot, "reservation_id": reservation_id,
+                            "players": players, "holes": holes},
+            "date_reserved": None,        # filled in by the snippet, client-side
+        },
+        "when": slot.get("time", ""),
+    }
+    return _CLAIM_TEMPLATE.replace("__CLAIM__", json.dumps(payload))
+
+
+_CLAIM_TEMPLATE = r"""
+(() => {
+  const C = __CLAIM__;
+  if (!location.hostname.includes('foreupsoftware.com')) {
+    alert('Run this on the ForeUp booking page first.');
+    return;
+  }
+  // Adopt the session that owns the hold.
+  document.cookie = 'PHPSESSID=' + C.sid + '; path=/; secure; samesite=None';
+  // Put the reservation where ForeUp's own code looks for it.
+  const res = C.res; res.date_reserved = new Date();
+  localStorage.setItem('pending_reservation', JSON.stringify(res));
+  console.log('[claim] session adopted, reservation stored:', C.res.reservation.reservation_id);
+  alert('Claimed ' + C.when + '.\nReloading — your held time should appear in the cart.');
+  location.reload();
+})();
+"""
+
+
 def sniper_js(job: dict, release_utc_iso: str | None = None) -> str:
     """
     Build the console script for one watch.

@@ -60,43 +60,48 @@ Tick **Snipe at release** when adding a watch and the app will:
 
 It does not place a hold — see below for why it cannot.
 
-### The hold has to happen in your browser, not here
+### 🅿️ Park and release
 
 Winning the race means claiming the slot before anyone else — ForeUp's
 `pending_reservation`, the "cart". That call is **not** captcha-gated and needs no
-login. But a pending reservation is scoped to the **session that created it**,
-and that turns out to be decisive. Verified live:
+login, and it locks the slot globally. Verified live:
 
 ```
-[A] holds 18:15                       -> {"success":true,"reservation_id":"TTID_..."}
-[B] (a different session) sees        -> SLOT GONE
-[B] tries to hold the same slot       -> {"success":false,
-                                          "message":"Sorry, that tee time is
-                                                     no longer available."}
+[A] holds 18:15                 -> {"success":true,"reservation_id":"TTID_..."}
+[B] a different session sees    -> SLOT GONE
+[B] tries to hold the same slot -> "Sorry, that tee time is no longer available."
 ```
 
-Session B is your phone. A hold placed by this server is invisible to you — it
-does not appear in your cart even when the server logs in as your own ForeUp
-account, which was tested directly. So the server holding a slot would take it
-off the sheet for everyone **including you**. That is why nothing here ever
-places a hold.
+But a pending reservation is scoped to the **session that created it**, and it
+cannot be handed over. Three things were tried and all failed:
 
-Instead the dashboard hands you a **browser sniper**: a self-contained script you
-paste into the console on the ForeUp booking page. It runs in your tab, with your
-cookies, so the hold it creates is genuinely yours — it writes the reservation
-into `localStorage` exactly where ForeUp's own code looks for it, then reloads so
-the booking modal shows the countdown. You confirm through the captcha as normal.
+| attempt | result |
+|---|---|
+| hold, then look on your phone | slot gone, no cart |
+| hold **logged in as you**, then look | same — gone, no cart |
+| copy the `PHPSESSID` cookie + `localStorage` into your browser | session adopts fine, but still no cart |
 
-It is self-contained because a script served from this app and fetched
-cross-origin would be blocked by CORS. `sniper.py` generates it per watch, with
-the date, window, player count, and release time baked in.
+The last one is the interesting failure. Ownership may well transfer — but
+ForeUp only shows a pending reservation *inside the booking modal*, which opens
+when you click a tee time tile. A held slot is not in the list, so there is no
+tile to click and no route to checkout.
 
-So there are two halves, and they are good at different things:
+So the server parks rather than hands over:
 
-| | runs where | good for |
-|---|---|---|
-| **Server snipe** | Railway, unattended | detecting the release ~250ms in and pushing an alert; works while you sleep |
-| **Browser sniper** | your own tab | actually claiming the slot; needs a browser open at 6am |
+1. A matching time appears — at a 6am release or a random mid-week cancellation
+2. The server claims it in ~200ms, so nobody else can take it
+3. Pushover tells you it is parked
+4. You open the booking page, then hit **Release**
+5. The slot reappears instantly and you click it the normal way
+
+The hold is **never refreshed**. It lapses on ForeUp's own 5-minute timer if you
+do not respond, so a slot is never off the sheet longer than someone sitting in
+checkout would hold it. Set `PARK_HOLDS=false` to disable parking entirely and
+get notification-only behaviour.
+
+The honest limitation: between Release and your click, the slot is open to
+everyone. That window is a second or two, which is a far better position than
+racing from scratch — but it is not a guarantee.
 
 ### Why it stops short of booking
 
@@ -201,6 +206,7 @@ teetime-booker/
 ├── test_snipe.py        ← Exercises the burst engine against a simulated release
 ├── sniper.py            ← Generates the in-browser sniper for a watch
 ├── test_sniper.py       ← Keeps the browser script and the client in sync
+├── test_park.py         ← Park, notify, no keep-alive, release once
 ├── probe_hold.py        ← One-shot live check that holding still works
 ├── templates/
 │   └── index.html       ← Single-page dashboard UI
@@ -209,7 +215,7 @@ teetime-booker/
 └── README.md
 ```
 
-Run `python test_snipe.py` and `python test_sniper.py` to verify the snipe engine — it fakes a sheet opening
+Run `python test_snipe.py`, `test_park.py`, and `test_sniper.py` to verify the snipe engine — it fakes a sheet opening
 mid-burst and asserts the hold and notification both fire. Worth running after
 any scheduler change, since the real thing only executes once a week.
 

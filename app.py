@@ -228,6 +228,31 @@ def add_job():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/jobs/<job_id>/release_hold", methods=["POST"])
+def release_hold(job_id):
+    """
+    Hand a parked tee time back to the sheet so the user can book it.
+
+    Time-critical: the slot is open to everyone the moment this returns, so the
+    response carries the booking link the caller should already be sitting on.
+    """
+    try:
+        parked = scheduler.release_hold(job_id)
+        job = scheduler.get_job(job_id) or {}
+        return jsonify({
+            "success": True,
+            "hold": parked,
+            "booking_url": ForeUpClient.booking_url(
+                job.get("course_id", ""), job.get("target_date", ""),
+                int(job.get("players", 2) or 2)),
+        })
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 404
+    except Exception as e:
+        logger.exception(f"release_hold failed for {job_id}")
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/jobs/<job_id>/sniper")
 def job_sniper(job_id):
     """

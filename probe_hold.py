@@ -48,15 +48,26 @@ def main() -> int:
     ap.add_argument("--handoff", action="store_true",
                     help="test whether a hold made by THIS session blocks a "
                          "different session (i.e. your phone)")
+    ap.add_argument("--adopt", action="store_true",
+                    help="test whether copying the PHPSESSID cookie transfers "
+                         "ownership of a hold to another session")
+    ap.add_argument("--claim", action="store_true",
+                    help="hold a slot, then print a snippet that hands the hold "
+                         "to YOUR browser. Keeps it alive until you press Enter.")
     ap.add_argument("--hold-open", action="store_true",
                     help="hold a slot and KEEP it while you check your phone, "
                          "then release on Enter. Use with --login.")
     args = ap.parse_args()
 
+    ap_adopt = getattr(args, "adopt", False)
     if args.handoff:
         return handoff_test(args)
     if args.hold_open:
         return hold_open_test(args)
+    if ap_adopt:
+        return adopt_test(args)
+    if getattr(args, "claim", False):
+        return claim_test(args)
 
     if args.login:
         email = os.environ.get("FOREUP_EMAIL", "")
@@ -139,6 +150,167 @@ def main() -> int:
                 _manual_cleanup(res_id)
 
     print("\nPaste this whole output into the chat.")
+    return 0
+
+
+def adopt_test(args) -> int:
+    """
+    Does copying the PHPSESSID cookie hand a hold to another session?
+
+    ForeUp's session cookie is NOT HttpOnly:
+
+        Set-Cookie: PHPSESSID=...; path=/; samesite=None; secure
+
+    so JavaScript in your own browser can set it. If ownership of a pending
+    reservation travels with that cookie, then the server can hold a slot the
+    instant it appears and then hand you the session — no browser running on
+    Railway, no tab left open at 6am.
+
+    A holds the slot. B is a stranger session (must be locked out). C is a fresh
+    session that copies A's cookie (must be able to act on A's hold).
+    """
+    a = fc.ForeUpClient()
+    if args.login:
+        email, password = os.environ.get("FOREUP_EMAIL",""), os.environ.get("FOREUP_PASSWORD","")
+        if not email or not password:
+            print("--adopt --login needs FOREUP_EMAIL / FOREUP_PASSWORD set.")
+            return 2
+        a = fc.ForeUpClient(email, password)
+        a.login(COURSE_ID)
+        print(f"[A] logged in as {email}")
+
+    times = a.fetch_tee_times(
+        course_id=COURSE_ID, schedule_id=SCHEDULE_ID, date=args.date,
+        time_from="00:00", time_to="23:59", players=args.players,
+        booking_class=BOOKING_CLASS)
+    if not times:
+        print(f"No open times on {args.date}.")
+        return 1
+    slot = times[-1]
+
+    a_sid = a.session.cookies.get("PHPSESSID")
+    print(f"Slot   : {slot['time']}   ${slot.get('green_fee')}")
+    print(f"[A] PHPSESSID = {a_sid}")
+
+    input("\nPress Enter to run the adoption test (Ctrl+C to abort) … ")
+
+    res_id = None
+    try:
+        raw = a.hold(slot, players=args.players, holes=18)
+        res_id = raw.get("reservation_id")
+        print(f"\n[A] held {slot['time']} — reservation {res_id}")
+
+        # B: a stranger. Must NOT be able to touch A's hold.
+        b = fc.ForeUpClient()
+        b.prewarm(COURSE_ID)
+        b_ok = b.refresh_hold(res_id)
+        print(f"[B] stranger session refresh of A's hold: "
+              f"{'ACCEPTED (!!)' if b_ok else 'rejected (expected)'}")
+
+        # C: fresh session that adopts A's cookie. Should behave as A.
+        c = fc.ForeUpClient()
+        c.session.cookies.set("PHPSESSID", a_sid, domain="foreupsoftware.com", path="/")
+        c_ok = c.refresh_hold(res_id)
+        print(f"[C] adopted-cookie refresh of A's hold: "
+              f"{'ACCEPTED' if c_ok else 'REJECTED'}")
+
+        print()
+        if c_ok and not b_ok:
+            print("=> SESSION ADOPTION WORKS.")
+            print("   The server can hold the instant a time appears, then hand you")
+            print("   the cookie; your browser becomes the owner and you just confirm.")
+        elif c_ok and b_ok:
+            print("=> INCONCLUSIVE: refresh is not session-checked at all,")
+            print("   so this call cannot prove ownership either way.")
+        else:
+            print("=> Adoption did NOT work; the hold is bound to more than the cookie.")
+    except Exception as e:
+        print(f"\nTEST ERROR: {type(e).__name__}: {e}")
+    finally:
+        if res_id:
+            ok = a.release_hold(res_id)
+            print(f"\n[A] released {res_id}: {'ok' if ok else 'FAILED'}")
+            if not ok:
+                _manual_cleanup(res_id)
+
+    print("\nPaste this whole output into the chat.")
+    return 0
+
+
+def claim_test(args) -> int:
+    """
+    The decisive end-to-end test, and the shape of the real feature.
+
+    Hold a slot here, then hand the holding session to your browser. If the cart
+    shows the time and checkout is reachable, the server can hold on your behalf
+    for any time that appears — a 6am release or a random Thursday cancellation —
+    and pass it to you. If not, holding has to stay in the browser.
+    """
+    import threading
+    from sniper import claim_js
+
+    client = fc.ForeUpClient()
+    if args.login:
+        email, password = os.environ.get("FOREUP_EMAIL",""), os.environ.get("FOREUP_PASSWORD","")
+        if not email or not password:
+            print("--claim --login needs FOREUP_EMAIL / FOREUP_PASSWORD set.")
+            return 2
+        client = fc.ForeUpClient(email, password)
+        client.login(COURSE_ID)
+        print(f"[server] logged in as {email}")
+    else:
+        print("[server] anonymous (add --login to also carry your account over)")
+
+    times = client.fetch_tee_times(
+        course_id=COURSE_ID, schedule_id=SCHEDULE_ID, date=args.date,
+        time_from="00:00", time_to="23:59", players=args.players,
+        booking_class=BOOKING_CLASS)
+    if not times:
+        print(f"No open times on {args.date}.")
+        return 1
+    slot = times[-1]
+    print(f"Slot: {slot['time']}   ${slot.get('green_fee')}   (LAST slot of the day)")
+
+    input("\nPress Enter to hold it and generate the claim snippet … ")
+
+    res_id = None
+    stop = threading.Event()
+    try:
+        raw = client.hold(slot, players=args.players, holes=18)
+        res_id = raw.get("reservation_id")
+        sid = client.session.cookies.get("PHPSESSID")
+        print(f"\n[server] HELD {slot['time']} — reservation {res_id}")
+
+        def keep_warm():
+            while not stop.wait(60):
+                client.refresh_hold(res_id)
+        threading.Thread(target=keep_warm, daemon=True).start()
+
+        print(f"""
+================= COPY EVERYTHING BELOW =================
+{claim_js(res_id, sid, slot, args.players, 18)}
+================= COPY EVERYTHING ABOVE =================
+
+  1. Open https://foreupsoftware.com/index.php/booking/{COURSE_ID}#/teetimes
+  2. F12 -> Console -> paste the block above -> Enter
+  3. The page reloads. Do you see {slot['time']} in a cart / countdown,
+     and can you get to the confirm screen?
+
+  DO NOT actually complete the booking - this is a real ${slot.get('green_fee')} round.
+  Getting as far as the confirm button is all the proof we need.
+""")
+        input("Press Enter when done, to release the hold … ")
+    except Exception as e:
+        print(f"FAILED: {type(e).__name__}: {e}")
+    finally:
+        stop.set()
+        if res_id:
+            ok = client.release_hold(res_id)
+            print(f"\n[server] released {res_id}: {'ok' if ok else 'FAILED'}")
+            if not ok:
+                _manual_cleanup(res_id)
+
+    print("\nPaste this output plus what you saw into the chat.")
     return 0
 
 

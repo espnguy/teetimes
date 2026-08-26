@@ -42,6 +42,9 @@ class FakeClient:
                  "course_id": 19536, "schedule_id": 1832, "teesheet_id": 1832,
                  "booking_class_id": 12800, "teesheet_side_id": 1465}]
     def prewarm(self, course_id): pass
+    def hold(self, slot, players, holes=18):
+        return {"success": True, "reservation_id": "TTID_SNIPE"}
+    def release_hold(self, rid): return True
 
 S.TeeTimeScheduler._client_for = staticmethod(lambda job, cfg: FakeClient())
 S.notify_times_available = lambda **kw: (
@@ -85,7 +88,7 @@ for l in LOGS:
         lag = time.time() - OPEN_AT
 print("detect lag  : ~%.2fs after release" % (lag if lag else -1))
 assert STATE["status"] == "available", "should have flipped to available"
-assert STATE.get("hold_result") is None, "the server must never place a hold"
+assert (STATE.get("hold_result") or {}).get("reservation_id") == "TTID_SNIPE",     "a snipe hit should park the slot"
 assert any("NOTIFY urgent=True" in l for l in LOGS), "should notify at emergency priority"
 assert STATE.get("snipe_at") is None, "snipe should disarm after a hit"
 assert attempts["n"] > 20, f"should have burst-polled many times, got {attempts['n']}"

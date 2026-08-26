@@ -77,6 +77,7 @@ def notify_times_available(
     times: list,
     dashboard_url: str = "",
     urgent: bool = False,
+    parked: dict | None = None,
 ) -> bool:
     """
     Send a tee time alert with a direct link to the booking page.
@@ -111,7 +112,11 @@ def notify_times_available(
     except Exception:
         pretty_date = date
 
-    if urgent:
+    if parked:
+        title = f"🅿️ PARKED {_fmt_time(parked.get('time'))} — {pretty_date}"
+        footer = ("Held for you for 5 min. Open the dashboard, get to the "
+                  "booking page, then hit Release and grab it.")
+    elif urgent:
         title = f"🔥 SHEET OPEN — {count} time{'s' if count > 1 else ''} {pretty_date}"
         footer = "⚠️ Just released — book NOW, these go in under a minute."
     else:
@@ -140,9 +145,10 @@ def notify_times_available(
         app_token=app_token,
         title=title,
         message=message,
-        url=booking_url,
-        url_title="Book now →" if urgent else "Open booking page →",
-        priority=2 if urgent else 1,
+        url_title=("Open dashboard →" if parked else
+                   ("Book now →" if urgent else "Open booking page →")),
+        url=(dashboard_url or booking_url) if parked else booking_url,
+        priority=2 if (urgent or parked) else 1,
     )
 
 

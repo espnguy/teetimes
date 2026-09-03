@@ -55,17 +55,72 @@ Tick **Snipe at release** when adding a watch and the app will:
    handled — 11:00 UTC in summer, 12:00 in winter).
 2. Burst-poll **4×/sec starting 20s before** release, on a dedicated thread
    reusing one HTTP session. Detection lands within ~250ms of the sheet opening.
-3. Attempt a **hold** on the earliest matching slot via ForeUp's
-   `pending_reservation` endpoint — the same call the booking page makes when you
-   click a time.
-4. Send a **priority-2 Pushover alert** that re-nags every 30s for 5 minutes.
+3. Send a **priority-2 Pushover alert** the moment anything matches, re-nagging
+   every 30s for 5 minutes.
 
-> **A hold is not a booking.** Nothing is charged and the round is not confirmed
-> until you complete checkout in the browser. Holds lapse after a few minutes.
->
-> A booking class with `block_online_booking` set cannot complete an online
-> booking at all — the hold will be refused and the job falls back to a fast
-> notification. The job log records exactly what the course said.
+It does not place a hold — see below for why it cannot.
+
+### 🅿️ Park and release
+
+Winning the race means claiming the slot before anyone else — ForeUp's
+`pending_reservation`, the "cart". That call is **not** captcha-gated and needs no
+login, and it locks the slot globally. Verified live:
+
+```
+[A] holds 18:15                 -> {"success":true,"reservation_id":"TTID_..."}
+[B] a different session sees    -> SLOT GONE
+[B] tries to hold the same slot -> "Sorry, that tee time is no longer available."
+```
+
+But a pending reservation is scoped to the **session that created it**, and it
+cannot be handed over. Three things were tried and all failed:
+
+| attempt | result |
+|---|---|
+| hold, then look on your phone | slot gone, no cart |
+| hold **logged in as you**, then look | same — gone, no cart |
+| copy the `PHPSESSID` cookie + `localStorage` into your browser | session adopts fine, but still no cart |
+
+The last one is the interesting failure. Ownership may well transfer — but
+ForeUp only shows a pending reservation *inside the booking modal*, which opens
+when you click a tee time tile. A held slot is not in the list, so there is no
+tile to click and no route to checkout.
+
+So the server parks rather than hands over:
+
+1. A matching time appears — at a 6am release or a random mid-week cancellation
+2. The server claims it in ~200ms, so nobody else can take it
+3. Pushover tells you it is parked
+4. You open the booking page, then hit **Release**
+5. The slot reappears instantly and you click it the normal way
+
+The hold is **never refreshed**. It lapses on ForeUp's own 5-minute timer if you
+do not respond, so a slot is never off the sheet longer than someone sitting in
+checkout would hold it. Set `PARK_HOLDS=false` to disable parking entirely and
+get notification-only behaviour.
+
+The honest limitation: between Release and your click, the slot is open to
+everyone. That window is a second or two, which is a far better position than
+racing from scratch — but it is not a guarantee.
+
+### Why it stops short of booking
+
+The final submit is captcha-gated, and this app will not defeat that:
+
+```js
+if (view.model.get("captchaid") || !SETTINGS.enable_captcha_online) {
+    view.createBooking(...)      // needs a reCAPTCHA token
+}
+```
+
+Grapevine has `enable_captcha_online = "1"`, so the last tap is yours either way.
+
+The hold payload must be **form-encoded** and carry exactly the 16 fields ForeUp's
+own bundle picks — including the price fields. JSON, or a partial payload, returns
+a bare HTTP 500 with an empty body. See `HOLD_FIELDS` in `foreup_client.py`;
+`test_sniper.py` asserts the browser script and the Python client stay in sync.
+
+`python probe_hold.py --handoff` re-runs the session-scoping experiment above.
 
 ---
 
@@ -98,7 +153,8 @@ URL directly.
 - 🏌️ **Saved course library** — set up a course once, reuse with one click
 - 🔍 **Auto-detects course IDs** — paste any booking URL and IDs are scraped automatically
 - 🌐 **Multi-platform** — ForeUp and GolfNow confirmed, TeeItUp with manual setup
-- 🎯 **Snipe mode** — burst-polls the instant a sheet opens and tries to hold a slot
+- 🎯 **Snipe mode** — burst-polls the instant a sheet opens, alerting in ~250ms
+- 🖥️ **Browser sniper** — claims the slot from your own session, where holds actually work
 - 🔎 **Zip-code discovery** — find nearby courses and see which are supported
 
 ---
@@ -148,6 +204,10 @@ teetime-booker/
 ├── notifier.py          ← Pushover push notifications
 ├── devserver.py         ← Runs the dashboard with an in-memory DB (local UI work)
 ├── test_snipe.py        ← Exercises the burst engine against a simulated release
+├── sniper.py            ← Generates the in-browser sniper for a watch
+├── test_sniper.py       ← Keeps the browser script and the client in sync
+├── test_park.py         ← Park, notify, no keep-alive, release once
+├── probe_hold.py        ← One-shot live check that holding still works
 ├── templates/
 │   └── index.html       ← Single-page dashboard UI
 ├── requirements.txt
@@ -155,7 +215,7 @@ teetime-booker/
 └── README.md
 ```
 
-Run `python test_snipe.py` to verify the snipe engine — it fakes a sheet opening
+Run `python test_snipe.py`, `test_park.py`, and `test_sniper.py` to verify the snipe engine — it fakes a sheet opening
 mid-burst and asserts the hold and notification both fire. Worth running after
 any scheduler change, since the real thing only executes once a week.
 

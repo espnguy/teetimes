@@ -7,8 +7,8 @@ import logging
 import threading
 import time
 import os
-from datetime import datetime, timezone
-from foreup_client import ForeUpClient, parse_course_url
+from datetime import datetime, timezone, timedelta
+from foreup_client import ForeUpClient, parse_course_url, HOLD_SECONDS
 from notifier import notify_times_available
 import db
 
@@ -25,6 +25,14 @@ TICK                 = 5.0
 SNIPE_LEAD_SECONDS   = 20     # start bursting this long before the release
 SNIPE_BURST_INTERVAL = 0.25   # ~4 requests/sec while the window is open
 SNIPE_WINDOW_SECONDS = 120    # give up this long after the release
+
+# Parking a found time. The server claims the slot so nobody else can take it
+# while you get to a browser, then hands it back on your say-so and you book it
+# normally. Deliberately NOT refreshed: ForeUp's own limit is 5 minutes and this
+# stays inside it, so a slot is never off the sheet longer than a human sitting
+# in checkout would hold it.
+PARK_ENABLED = os.environ.get("PARK_HOLDS", "true").lower() == "true"
+
 
 
 class TeeTimeScheduler:
@@ -213,6 +221,14 @@ class TeeTimeScheduler:
             cfg = db.load_config()
             client = self._client_for(job, cfg)
 
+            # Establish the session now, not on the first hold — that fetch cost
+            # ~900ms when measured, which is the whole race.
+            if hasattr(client, "prewarm"):
+                try:
+                    client.prewarm(job["course_id"])
+                except Exception as e:
+                    self._log(job_id, f"⚠️ Could not pre-warm session: {e}")
+
             self._log(job_id,
                 f"🎯 Release window open — burst-polling every "
                 f"{SNIPE_BURST_INTERVAL}s until {int(SNIPE_WINDOW_SECONDS)}s past release.")
@@ -248,27 +264,28 @@ class TeeTimeScheduler:
             self._snipe_threads.pop(job_id, None)
 
     def _handle_snipe_hit(self, job: dict, times: list, cfg: dict, client):
-        """Times appeared during the release window — try to hold, then notify."""
+        """
+        Times appeared during the release window — park the best one and alert.
+
+        A parked slot cannot be handed to your browser: ForeUp scopes a pending
+        reservation to the session that made it, so it reads as "no longer
+        available" to you exactly as it does to everyone else — verified, even
+        with the server logged in as your own account. What parking buys is
+        *time*: nobody else can take it either, so you can reach a browser and
+        then hit Release to put it back and book it immediately.
+        """
         job_id = job["id"]
+        # Disarm before doing anything else. The release window stays "burst" for
+        # up to SNIPE_WINDOW_SECONDS after a hit, and without this the poll loop
+        # re-enters and fires again on every pass.
         db.update_job_fields(job_id, {
             "status":          "available",
             "available_times": times,
             "last_polled":     datetime.now(),
+            "snipe_at":        None,
         })
 
-        hold = None
-        if job.get("platform", "foreup") == "foreup":
-            best = times[0]   # earliest slot inside the requested window
-            try:
-                hold = client.hold(best, players=job["players"], holes=job.get("holes", 18))
-                db.update_job_fields(job_id, {"hold_result": hold})
-                self._log(job_id,
-                    f"🔒 Held {best.get('time')} for {job['players']} — "
-                    f"confirm in the browser before it lapses.")
-            except PermissionError as e:
-                self._log(job_id, f"🔓 Could not hold (booking class restricted): {e}")
-            except Exception as e:
-                self._log(job_id, f"🔓 Hold attempt failed: {e}")
+        parked = self._park(job, times, client)
 
         sent = notify_times_available(
             user_token=cfg.get("pushover_user_token", ""),
@@ -276,11 +293,86 @@ class TeeTimeScheduler:
             job=job,
             times=times,
             dashboard_url=cfg.get("dashboard_url", ""),
-            held=hold is not None,
+            urgent=True,
+            parked=parked,
         )
         db.update_job_fields(job_id, {"notification_sent": sent})
         self._log(job_id,
             "📲 Notification sent." if sent else "⚠️ Pushover not configured.")
+
+    def _park(self, job: dict, times: list, client) -> dict | None:
+        """
+        Claim the best matching slot so nobody else takes it while you get to a
+        browser. You then hit Release and book it normally.
+
+        A parked slot is NOT refreshed — it lapses on ForeUp's own 5 minute
+        timer if you never respond, so it is never off the sheet longer than a
+        person sitting in checkout would hold it.
+        """
+        if not PARK_ENABLED or job.get("platform", "foreup") != "foreup":
+            return None
+        job_id = job["id"]
+        best = times[0]     # earliest slot inside the requested window
+        try:
+            t0 = time.time()
+            raw = client.hold(best, players=job["players"], holes=job.get("holes", 18))
+            ms = (time.time() - t0) * 1000
+            reservation_id = raw.get("reservation_id") or raw.get("id")
+            if not reservation_id:
+                self._log(job_id, f"⚠️ Hold returned no reservation id: {raw}")
+                return None
+
+            now = datetime.now(timezone.utc)
+            parked = {
+                "reservation_id": reservation_id,
+                "time":           best.get("time"),
+                "green_fee":      best.get("green_fee"),
+                "players":        job["players"],
+                "held_at":        now.isoformat(),
+                "expires_at":     (now + timedelta(
+                                      seconds=HOLD_SECONDS)).isoformat(),
+                "released":       False,
+            }
+            db.update_job_fields(job_id, {"hold_result": parked})
+            self._log(job_id,
+                f"🅿️ PARKED {best.get('time')} for {job['players']} in {ms:.0f}ms "
+                f"({reservation_id}). Nobody else can take it for "
+                f"{HOLD_SECONDS // 60} min — hit Release when you're "
+                f"at the booking page.")
+            return parked
+        except PermissionError as e:
+            self._log(job_id, f"🔓 Could not park (booking class restricted): {e}")
+        except Exception as e:
+            self._log(job_id, f"🔓 Park attempt failed: {e}")
+        return None
+
+    def release_hold(self, job_id: str) -> dict:
+        """
+        Hand a parked slot back so you can book it.
+
+        The moment this returns, the time is on the sheet for everyone — so the
+        dashboard only offers it once you say you are ready, and points you
+        straight at the booking page.
+        """
+        job = db.load_job(job_id)
+        if not job:
+            raise ValueError("Job not found")
+        parked = job.get("hold_result") or {}
+        reservation_id = parked.get("reservation_id")
+        if not reservation_id:
+            raise ValueError("Nothing is parked for this job")
+        if parked.get("released"):
+            return parked
+
+        client = self._client_for(job, db.load_config())
+        client.prewarm(job["course_id"])
+        ok = client.release_hold(reservation_id)
+        updated = {**parked, "released": True, "release_ok": ok,
+                   "released_at": datetime.now(timezone.utc).isoformat()}
+        db.update_job_fields(job_id, {"hold_result": updated})
+        self._log(job_id,
+            f"🏁 Released {parked.get('time')} — it is back on the sheet NOW. Go.")
+        return updated
 
     @staticmethod
     def _client_for(job: dict, cfg: dict):
@@ -346,12 +438,17 @@ class TeeTimeScheduler:
                     f"Earliest: {times[0].get('time')}"
                 )
                 if not already_notified:
+                    # A cancellation that pops up mid-week is the same race as a
+                    # 6am release, just quieter — park it so it is still there
+                    # when you reach a browser.
+                    parked = self._park(job, times, client)
                     sent = notify_times_available(
                         user_token=cfg.get("pushover_user_token", ""),
                         app_token=cfg.get("pushover_app_token", ""),
                         job=job,
                         times=times,
                         dashboard_url=cfg.get("dashboard_url", ""),
+                        parked=parked,
                     )
                     db.update_job_fields(job_id, {"notification_sent": sent})
                     if sent:

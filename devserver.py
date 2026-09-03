@@ -47,5 +47,9 @@ db.save_platform_cache   = lambda w, p, b="": CACHE.__setitem__(w, {"platform": 
 
 import app as A
 
+# Pick up template edits without a restart.
+A.app.jinja_env.auto_reload = True
+A.app.config["TEMPLATES_AUTO_RELOAD"] = True
+
 if __name__ == "__main__":
     A.app.run(host="127.0.0.1", port=5055, debug=False, use_reloader=False)

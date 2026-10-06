@@ -118,11 +118,22 @@ def resolve_course_from_url(url: str, force: bool = False) -> dict:
     except Exception as e:
         raise ValueError(str(e))
 
+    # A facility can run several tee sheets (e.g. Watters Creek: /22168/10027 is
+    # The Traditions Course, /22168/10028 the other). A sheet named in the URL
+    # path is the one the user means. parse_course_url defaults it to course_id.
+    path_schedule_id = basic.get("schedule_id")
+    if path_schedule_id == course_id:
+        path_schedule_id = None
+
     # Step 2 — check saved courses, unless the row predates the current resolver
     courses = db.load_courses()
     if course_id in courses and not force:
         saved = courses[course_id]
-        if _is_current(saved):
+        if path_schedule_id and str(saved.get("schedule_id")) != path_schedule_id:
+            logger.info(
+                f"Saved course {course_id} is tee sheet {saved.get('schedule_id')}, "
+                f"URL asks for {path_schedule_id} — re-detecting.")
+        elif _is_current(saved):
             logger.info(f"Using saved course {course_id}: {saved.get('name')}")
             return saved
         logger.info(
@@ -135,11 +146,15 @@ def resolve_course_from_url(url: str, force: bool = False) -> dict:
     # over anything scraped, but we still fetch the page below for the course
     # name, release time, and timezone. Short-circuiting here would produce a
     # row that cannot support snipe mode.
-    url_schedule_id   = basic.get("schedule_id") if basic.get("booking_class") else None
+    url_schedule_id   = path_schedule_id or (
+        basic.get("schedule_id") if basic.get("booking_class") else None)
     url_booking_class = basic.get("booking_class")
 
     # Step 4 — fetch the booking page and scrape the config
+    # The page only embeds the booking classes of the sheet it opens on.
     booking_url = f"{BASE}/index.php/booking/{course_id}"
+    if path_schedule_id:
+        booking_url += f"/{path_schedule_id}"
     logger.info(f"Fetching booking page to auto-detect IDs: {booking_url}")
 
     try:
@@ -166,8 +181,15 @@ def resolve_course_from_url(url: str, force: bool = False) -> dict:
     booking_classes = _extract_booking_classes(html)
 
     # A booking class carries the tee sheet it belongs to; that beats the regex.
-    if booking_classes and booking_classes[0].get("teesheet_id"):
+    if url_schedule_id:
+        schedule_id = url_schedule_id
+    elif booking_classes and booking_classes[0].get("teesheet_id"):
         schedule_id = booking_classes[0]["teesheet_id"]
+    # Only a class on this sheet is valid for it; ForeUp quietly returns
+    # nothing (not an error) for a class from another sheet.
+    on_sheet = [c for c in booking_classes if c.get("teesheet_id") in ("", schedule_id)]
+    if on_sheet:
+        booking_classes = on_sheet
 
     booking_class = _pick_booking_class(course_id, schedule_id, booking_classes)
 
@@ -187,6 +209,11 @@ def resolve_course_from_url(url: str, force: bool = False) -> dict:
         '', name, flags=re.IGNORECASE).strip()
     if not name:
         name = f"Course {course_id}"
+    if path_schedule_id:
+        sheet = re.search(
+            rf'"teesheet_id"\s*:\s*"?{path_schedule_id}"?\s*,[^{{}}]*?"title"\s*:\s*"([^"]+)"', html)
+        if sheet and sheet.group(1).lower() not in name.lower():
+            name = f"{name} – {sheet.group(1)}"
 
     if not schedule_id:
         raise RuntimeError(
@@ -464,35 +491,17 @@ def _extract_booking_classes(html: str) -> list[dict]:
     booking page. Returns the bookable ones (active, not hidden), each with
     booking_class_id / teesheet_id / name / block_online_booking.
     """
+    # A multi-sheet facility embeds one array per tee sheet — read them all.
     marker = '"booking_classes":'
+    classes, seen = [], set()
     idx = html.find(marker)
-    if idx == -1:
-        return []
-
-    start = html.find("[", idx)
-    if start == -1:
-        return []
-
-    # Bracket-match to find the end of the array — it contains nested objects.
-    depth, end = 0, -1
-    for i in range(start, len(html)):
-        c = html[i]
-        if c == "[":
-            depth += 1
-        elif c == "]":
-            depth -= 1
-            if depth == 0:
-                end = i + 1
-                break
-    if end == -1:
-        return []
-
-    raw = html[start:end].replace("\\/", "/")
-    try:
-        classes = json.loads(raw)
-    except Exception as e:
-        logger.warning(f"Could not parse booking_classes JSON: {e}")
-        return []
+    while idx != -1:
+        for c in _json_array_at(html, idx):
+            key = isinstance(c, dict) and c.get("booking_class_id")
+            if key and key not in seen:
+                seen.add(key)
+                classes.append(c)
+        idx = html.find(marker, idx + len(marker))
 
     bookable = [
         {
@@ -516,6 +525,35 @@ def _extract_booking_classes(html: str) -> list[dict]:
     return bookable
 
 
+def _json_array_at(html: str, idx: int) -> list:
+    """Parse the JSON array that starts after position idx, or [] if there isn't one."""
+    start = html.find("[", idx)
+    if start == -1:
+        return []
+
+    # Bracket-match to find the end of the array — it contains nested objects.
+    depth, end = 0, -1
+    for i in range(start, len(html)):
+        c = html[i]
+        if c == "[":
+            depth += 1
+        elif c == "]":
+            depth -= 1
+            if depth == 0:
+                end = i + 1
+                break
+    if end == -1:
+        return []
+
+    raw = html[start:end].replace("\\/", "/")
+    try:
+        parsed = json.loads(raw)
+    except Exception as e:
+        logger.warning(f"Could not parse booking_classes JSON: {e}")
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
 def _pick_booking_class(course_id: str, schedule_id: str, classes: list[dict]) -> str:
     """
     Choose the booking class that actually returns tee times.
@@ -534,7 +572,8 @@ def _pick_booking_class(course_id: str, schedule_id: str, classes: list[dict]) -
     # Prefer names that read as open-to-all, but verify rather than trust.
     def openness(c: dict) -> int:
         n = c["name"].lower()
-        if any(w in n for w in ("public", "guest", "non-member", "nonmember")):
+        if any(w in n for w in ("public", "guest", "non-member", "nonmember",
+                                "non-resident", "nonresident")):
             return 0
         return 1
 

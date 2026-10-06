@@ -39,6 +39,42 @@ HEADERS = {
     "Sec-Ch-Ua-Platform": '"Windows"',
 }
 
+# Headers that identify the browser. curl_cffi sends its own set that matches
+# the Chrome TLS fingerprint it impersonates; overriding them with a different
+# Chrome version is exactly the mismatch Cloudflare looks for.
+_BROWSER_ID_HEADERS = ("User-Agent", "Accept-Encoding",
+                       "Sec-Ch-Ua", "Sec-Ch-Ua-Mobile", "Sec-Ch-Ua-Platform")
+
+try:
+    from curl_cffi import requests as _cffi_requests
+except ImportError:  # local dev without curl_cffi installed
+    _cffi_requests = None
+
+
+def new_session():
+    """
+    An HTTP session for GolfNow / TeeItUp.
+
+    GolfNow sits behind Cloudflare, which 403s plain python-requests from cloud
+    hosts. curl_cffi makes the TLS/HTTP2 handshake look like real Chrome.
+    Falls back to requests (with our spoofed headers) if curl_cffi is missing.
+    """
+    if _cffi_requests is not None:
+        session = _cffi_requests.Session(impersonate="chrome")
+        session.headers.update(
+            {k: v for k, v in HEADERS.items() if k not in _BROWSER_ID_HEADERS})
+        return session
+    session = requests.Session()
+    session.headers.update(HEADERS)
+    return session
+
+
+def request_headers(**extra) -> dict:
+    """Per-request headers for new_session(), without clobbering its browser identity."""
+    base = HEADERS if _cffi_requests is None else {
+        k: v for k, v in HEADERS.items() if k not in _BROWSER_ID_HEADERS}
+    return {**base, **extra}
+
 
 def parse_golfnow_url(url: str) -> dict:
     """
@@ -102,8 +138,7 @@ class GolfNowClient:
     """
 
     def __init__(self):
-        self.session = requests.Session()
-        self.session.headers.update(HEADERS)
+        self.session = new_session()
         self._golfnow_session_ready = False
 
     def fetch_tee_times(
@@ -184,12 +219,11 @@ class GolfNowClient:
         kenna_base = "https://phx-api-be-east-1b.kenna.io"
         alias = be_alias or facility_id
 
-        kenna_headers = {
-            **HEADERS,
+        kenna_headers = request_headers(**{
             "Origin":     f"https://{alias}.book.teeitup.golf",
             "Referer":    f"https://{alias}.book.teeitup.golf/",
             "X-Be-Alias": alias,
-        }
+        })
 
         url = f"{kenna_base}/course/{facility_id}/tee-time/locks"
         params = {"localDate": date}
@@ -279,8 +313,7 @@ class GolfNowClient:
             "view":                     "Grouping",
         }
 
-        headers = {
-            **HEADERS,
+        headers = request_headers(**{
             "Accept":          "application/json, text/plain, */*",
             "Content-Type":    "application/json",
             "Origin":          "https://www.golfnow.com",
@@ -288,7 +321,7 @@ class GolfNowClient:
             "Sec-Fetch-Dest":  "empty",
             "Sec-Fetch-Mode":  "cors",
             "Sec-Fetch-Site":  "same-origin",
-        }
+        })
 
         resp = self.session.post(url, json=payload, headers=headers, timeout=15)
         resp.raise_for_status()

@@ -136,6 +136,9 @@ def notify_times_available(
     if platform in ("teeitup", "golfnow"):
         from golfnow_client import GolfNowClient
         booking_url = GolfNowClient.booking_url(course_id, date, int(players), platform)
+    elif platform == "purposegolf":
+        from purposegolf_client import PurposeGolfClient
+        booking_url = PurposeGolfClient.booking_url(job.get("course_url", ""))
     else:
         from foreup_client import ForeUpClient
         booking_url = ForeUpClient.booking_url(course_id, date, int(players))

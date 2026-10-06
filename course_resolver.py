@@ -57,6 +57,8 @@ def detect_platform(url: str) -> str:
         return "teeitup"
     if "golfnow.com" in url_lower:
         return "golfnow"
+    if "purposegolf.com" in url_lower:
+        return "purposegolf"
     if "foreupsoftware.com" in url_lower or "foreup" in url_lower:
         return "foreup"
     # Could be a course website — fetch page and check for embedded platforms
@@ -95,6 +97,8 @@ def resolve_course_from_url(url: str, force: bool = False) -> dict:
 
     if platform in ("teeitup", "golfnow"):
         return _resolve_golfnow(clean_url, platform, force=force)
+    if platform == "purposegolf":
+        return _resolve_purposegolf(clean_url, force=force)
 
     # Unknown — fetch the page and look for embedded booking platform links
     if platform == "unknown":
@@ -106,7 +110,8 @@ def resolve_course_from_url(url: str, force: bool = False) -> dict:
             "Please paste the direct booking page URL instead:\n"
             "• ForeUp: https://foreupsoftware.com/index.php/booking/NNNNN\n"
             "• GolfNow: https://www.golfnow.com/tee-times/facility/NNNNN-course-name\n"
-            "• TeeItUp: https://course-name.book.teeitup.golf/tee-times"
+            "• TeeItUp: https://course-name.book.teeitup.golf/tee-times\n"
+            "• Purpose Golf: https://booking.purposegolf.com/courses/CourseName/N/teetimes"
         )
 
     from foreup_client import parse_course_url
@@ -118,11 +123,22 @@ def resolve_course_from_url(url: str, force: bool = False) -> dict:
     except Exception as e:
         raise ValueError(str(e))
 
+    # A facility can run several tee sheets (e.g. Watters Creek: /22168/10027 is
+    # The Traditions Course, /22168/10028 the other). A sheet named in the URL
+    # path is the one the user means. parse_course_url defaults it to course_id.
+    path_schedule_id = basic.get("schedule_id")
+    if path_schedule_id == course_id:
+        path_schedule_id = None
+
     # Step 2 — check saved courses, unless the row predates the current resolver
     courses = db.load_courses()
     if course_id in courses and not force:
         saved = courses[course_id]
-        if _is_current(saved):
+        if path_schedule_id and str(saved.get("schedule_id")) != path_schedule_id:
+            logger.info(
+                f"Saved course {course_id} is tee sheet {saved.get('schedule_id')}, "
+                f"URL asks for {path_schedule_id} — re-detecting.")
+        elif _is_current(saved):
             logger.info(f"Using saved course {course_id}: {saved.get('name')}")
             return saved
         logger.info(
@@ -135,11 +151,15 @@ def resolve_course_from_url(url: str, force: bool = False) -> dict:
     # over anything scraped, but we still fetch the page below for the course
     # name, release time, and timezone. Short-circuiting here would produce a
     # row that cannot support snipe mode.
-    url_schedule_id   = basic.get("schedule_id") if basic.get("booking_class") else None
+    url_schedule_id   = path_schedule_id or (
+        basic.get("schedule_id") if basic.get("booking_class") else None)
     url_booking_class = basic.get("booking_class")
 
     # Step 4 — fetch the booking page and scrape the config
+    # The page only embeds the booking classes of the sheet it opens on.
     booking_url = f"{BASE}/index.php/booking/{course_id}"
+    if path_schedule_id:
+        booking_url += f"/{path_schedule_id}"
     logger.info(f"Fetching booking page to auto-detect IDs: {booking_url}")
 
     try:
@@ -166,8 +186,15 @@ def resolve_course_from_url(url: str, force: bool = False) -> dict:
     booking_classes = _extract_booking_classes(html)
 
     # A booking class carries the tee sheet it belongs to; that beats the regex.
-    if booking_classes and booking_classes[0].get("teesheet_id"):
+    if url_schedule_id:
+        schedule_id = url_schedule_id
+    elif booking_classes and booking_classes[0].get("teesheet_id"):
         schedule_id = booking_classes[0]["teesheet_id"]
+    # Only a class on this sheet is valid for it; ForeUp quietly returns
+    # nothing (not an error) for a class from another sheet.
+    on_sheet = [c for c in booking_classes if c.get("teesheet_id") in ("", schedule_id)]
+    if on_sheet:
+        booking_classes = on_sheet
 
     booking_class = _pick_booking_class(course_id, schedule_id, booking_classes)
 
@@ -187,6 +214,11 @@ def resolve_course_from_url(url: str, force: bool = False) -> dict:
         '', name, flags=re.IGNORECASE).strip()
     if not name:
         name = f"Course {course_id}"
+    if path_schedule_id:
+        sheet = re.search(
+            rf'"teesheet_id"\s*:\s*"?{path_schedule_id}"?\s*,[^{{}}]*?"title"\s*:\s*"([^"]+)"', html)
+        if sheet and sheet.group(1).lower() not in name.lower():
+            name = f"{name} – {sheet.group(1)}"
 
     if not schedule_id:
         raise RuntimeError(
@@ -227,6 +259,7 @@ PLATFORM_PATTERNS = (
     ("teeitup",    r'[\w-]+\.book\.teeitup\.(?:golf|com)[^\s"\'<>]*'),
     ("teeitup",    r'book\.teeitup\.(?:golf|com)[^\s"\'<>]*'),
     ("golfnow",    r'golfnow\.com/tee-times/facility/\d+[^\s"\'<>]*'),
+    ("purposegolf", r'booking\.purposegolf\.com/courses/[\w-]+/\d+[^\s"\'<>]*'),
     # Recognised but not supported yet — naming them beats a bare "unknown".
     ("chronogolf", r'chronogolf\.com/(?:widgets?|club)/[\w/-]+'),
     ("chronogolf", r'chronogolfSettings|chronogolf-js'),
@@ -350,6 +383,11 @@ def _detect_from_page(url: str) -> dict:
                 "golfnow"
             )
 
+        # Look for a Purpose Golf booking link
+        m = re.search(r'booking\.purposegolf\.com/courses/[\w-]+/\d+', html)
+        if m:
+            return _resolve_purposegolf(f"https://{m.group(0)}/teetimes")
+
         # Look for ForeUp embed
         m = re.search(r'foreupsoftware\.com/index\.php/booking/(\d+)', html)
         if m:
@@ -397,10 +435,16 @@ def _resolve_golfnow(url: str, platform: str, force: bool = False) -> dict:
             name = subdomain.replace("-", " ").title()
 
     # Fetch page once — reuse for both name and ObjectId extraction
+    from golfnow_client import new_session
+    session = new_session()
     resp = None
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=15)
+        resp = session.get(url, timeout=15)
         m = re.search(r'<title>([^<]+)</title>', resp.text, re.IGNORECASE)
+        # A Cloudflare block/challenge page is not the course — keep the URL-derived name
+        if m and re.search(r"attention required|just a moment|cloudflare", m.group(1), re.IGNORECASE):
+            logger.warning(f"GolfNow page for {facility_id} was a Cloudflare page (status {resp.status_code})")
+            m = None
         if m:
             raw_name = m.group(1).strip()
             # Strip trailing platform names
@@ -419,7 +463,7 @@ def _resolve_golfnow(url: str, platform: str, force: bool = False) -> dict:
     if platform == "teeitup":
         try:
             if not resp:
-                resp = requests.get(url, headers=HEADERS, timeout=15)
+                resp = session.get(url, timeout=15)
             # Look for the ObjectId in the page JS bundles/config
             m = re.search(r'"courseId"\s*:\s*"([a-f0-9]{24})"', resp.text)
             if not m:
@@ -452,41 +496,70 @@ def _resolve_golfnow(url: str, platform: str, force: bool = False) -> dict:
     return result
 
 
+def _resolve_purposegolf(url: str, force: bool = False) -> dict:
+    """Resolve a Purpose Golf course URL. The feed needs only the numeric id."""
+    from purposegolf_client import parse_purposegolf_url
+    info = parse_purposegolf_url(url)
+    course_id = info["course_id"]
+
+    courses = db.load_courses()
+    saved = courses.get(course_id)
+    if saved and not force and saved.get("platform") == "purposegolf":
+        logger.info(f"Using saved Purpose Golf course {course_id}: {saved.get('name')}")
+        return saved
+
+    # "SherrillParkCourse2" → "Sherrill Park Course 2" until the page says better
+    name = re.sub(r"(?<=[a-z])(?=[A-Z0-9])", " ", info["slug"])
+    try:
+        from golfnow_client import new_session
+        html = new_session().get(info["url"], timeout=15).text
+        m = re.search(r"<title>([^<]+)</title>", html, re.IGNORECASE)
+        if m:
+            # "Sherrill Park #2 Online Tee Times - Purpose Golf" → "Sherrill Park #2"
+            cleaned = re.sub(r"\s*(Online\s+)?Tee\s+Times.*$", "", m.group(1).strip(),
+                             flags=re.IGNORECASE).strip()
+            if cleaned and not re.search(r"attention required|just a moment|cloudflare",
+                                         cleaned, re.IGNORECASE):
+                name = cleaned
+    except Exception as e:
+        logger.warning(f"Could not fetch Purpose Golf page for name: {e}")
+
+    result = {
+        "course_id":        course_id,
+        "schedule_id":      course_id,
+        "booking_class":    "",
+        "name":             name,
+        "url":              info["url"],
+        "platform":         "purposegolf",
+        "be_alias":         "",
+        "booking_classes":  [],
+        # Release time not known yet, so snipe mode is refused for these.
+        "online_open_time": "",
+        "timezone":         "America/Chicago",
+        "resolver_version": RESOLVER_VERSION,
+    }
+    save_course(course_id, result)
+    logger.info(f"Saved Purpose Golf course {course_id}: {name}")
+    return result
+
+
 def _extract_booking_classes(html: str) -> list[dict]:
     """
     Pull the `booking_classes` array out of the JSON blob ForeUp embeds in the
     booking page. Returns the bookable ones (active, not hidden), each with
     booking_class_id / teesheet_id / name / block_online_booking.
     """
+    # A multi-sheet facility embeds one array per tee sheet — read them all.
     marker = '"booking_classes":'
+    classes, seen = [], set()
     idx = html.find(marker)
-    if idx == -1:
-        return []
-
-    start = html.find("[", idx)
-    if start == -1:
-        return []
-
-    # Bracket-match to find the end of the array — it contains nested objects.
-    depth, end = 0, -1
-    for i in range(start, len(html)):
-        c = html[i]
-        if c == "[":
-            depth += 1
-        elif c == "]":
-            depth -= 1
-            if depth == 0:
-                end = i + 1
-                break
-    if end == -1:
-        return []
-
-    raw = html[start:end].replace("\\/", "/")
-    try:
-        classes = json.loads(raw)
-    except Exception as e:
-        logger.warning(f"Could not parse booking_classes JSON: {e}")
-        return []
+    while idx != -1:
+        for c in _json_array_at(html, idx):
+            key = isinstance(c, dict) and c.get("booking_class_id")
+            if key and key not in seen:
+                seen.add(key)
+                classes.append(c)
+        idx = html.find(marker, idx + len(marker))
 
     bookable = [
         {
@@ -510,6 +583,35 @@ def _extract_booking_classes(html: str) -> list[dict]:
     return bookable
 
 
+def _json_array_at(html: str, idx: int) -> list:
+    """Parse the JSON array that starts after position idx, or [] if there isn't one."""
+    start = html.find("[", idx)
+    if start == -1:
+        return []
+
+    # Bracket-match to find the end of the array — it contains nested objects.
+    depth, end = 0, -1
+    for i in range(start, len(html)):
+        c = html[i]
+        if c == "[":
+            depth += 1
+        elif c == "]":
+            depth -= 1
+            if depth == 0:
+                end = i + 1
+                break
+    if end == -1:
+        return []
+
+    raw = html[start:end].replace("\\/", "/")
+    try:
+        parsed = json.loads(raw)
+    except Exception as e:
+        logger.warning(f"Could not parse booking_classes JSON: {e}")
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
 def _pick_booking_class(course_id: str, schedule_id: str, classes: list[dict]) -> str:
     """
     Choose the booking class that actually returns tee times.
@@ -528,7 +630,8 @@ def _pick_booking_class(course_id: str, schedule_id: str, classes: list[dict]) -
     # Prefer names that read as open-to-all, but verify rather than trust.
     def openness(c: dict) -> int:
         n = c["name"].lower()
-        if any(w in n for w in ("public", "guest", "non-member", "nonmember")):
+        if any(w in n for w in ("public", "guest", "non-member", "nonmember",
+                                "non-resident", "nonresident")):
             return 0
         return 1
 

@@ -107,6 +107,7 @@ class ForeUpClient:
         self._customer_id = None
         self._course_id = "19536"
         self._booking_class_id = ""
+        self.login_error = ""
 
     # ── Auth ──────────────────────────────────────────────────────────────────
 
@@ -169,7 +170,19 @@ class ForeUpClient:
         if self._logged_in:
             return
         if self.email and self.password:
-            self.login(course_id)
+            try:
+                self.login(course_id)
+                return
+            except PermissionError as e:
+                # ForeUp accounts are per course: the saved login is often for
+                # a different course. Public booking classes still work without
+                # one, so carry on; a restricted class will 401 on its own.
+                self.login_error = str(e)
+                logger.warning(f"Login refused for course {course_id}; continuing without login: {e}")
+                self.session = requests.Session()
+                self.session.headers.update(HEADERS)
+                self._init_session(course_id)
+                self._logged_in = True  # don't retry the login every poll
         else:
             # Public mode — we still need a PHPSESSID or ForeUp answers
             # "Refresh required" to the availability call.

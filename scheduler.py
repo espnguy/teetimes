@@ -385,6 +385,9 @@ class TeeTimeScheduler:
         if job.get("platform", "foreup") in ("teeitup", "golfnow"):
             from golfnow_client import GolfNowClient
             return GolfNowClient()
+        if job.get("platform") == "purposegolf":
+            from purposegolf_client import PurposeGolfClient
+            return PurposeGolfClient()
         return ForeUpClient(cfg.get("email"), cfg.get("password"))
 
     @staticmethod
@@ -420,6 +423,13 @@ class TeeTimeScheduler:
         try:
             client = self._client_for(job, cfg)
             times = self._fetch(client, job)
+
+            # Say once (not every poll) that the saved login didn't work here.
+            login_note = "🔓 Saved ForeUp login was refused by this course"
+            if getattr(client, "login_error", "") and not any(
+                    login_note in entry for entry in job.get("logs") or []):
+                self._log(job_id, f"{login_note} — checking public tee times "
+                                  f"without it. ({client.login_error})")
 
             now_str = datetime.now().strftime("%H:%M:%S")
             db.update_job_fields(job_id, {

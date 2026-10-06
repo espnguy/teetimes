@@ -37,7 +37,7 @@ OVERPASS_HEADERS = {
 }
 
 # Platforms this app can actually poll today.
-SUPPORTED = {"foreup", "golfnow", "teeitup"}
+SUPPORTED = {"foreup", "golfnow", "teeitup", "purposegolf"}
 
 # Recognised but unsupported — naming them beats a bare "unknown".
 KNOWN_UNSUPPORTED = {

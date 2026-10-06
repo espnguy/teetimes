@@ -70,6 +70,7 @@ class TeeTimeScheduler:
             "players":       int(data["players"]),
             "holes":         int(data.get("holes", 18)),
             "platform":      data.get("platform", "foreup"),
+            "be_alias":      data.get("be_alias", ""),
             "status":        "polling",
             "snipe_at":      data.get("snipe_at") or None,
             "logs":          [],

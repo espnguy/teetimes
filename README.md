@@ -259,6 +259,9 @@ In your web service → **Variables** tab:
 | `PUSHOVER_USER_TOKEN` | your Pushover user key | All notifications |
 | `PUSHOVER_APP_TOKEN` | your Pushover app token | All notifications |
 | `POLL_INTERVAL` | `120` (seconds, default 2 min) | Optional |
+| `PROXY_URL` | residential proxy gateway, e.g. `http://user:pass@gate.example.com:7000` | GolfNow / TeeItUp courses |
+
+**Why `PROXY_URL`:** GolfNow's Cloudflare blocks Railway's addresses outright (HTTP 403), so GolfNow/TeeItUp requests — and only those — go out through a residential proxy when this is set. Use a *residential*, *rotating* plan; a datacenter proxy is blocked the same way. A 403 is retried once on a fresh connection, which a rotating gateway gives a new exit IP. Put a literal `{session}` where your provider expects a sticky-session id (e.g. `http://user-session-{session}:pass@…`) and each poll gets its own id — so a snipe burst keeps one IP and the next poll gets a new one. The job log shows which route each poll took; credentials are never logged. Traffic is tiny: roughly 10 KB per poll, ~250 MB/month per watch at the default interval.
 
 ### 5. Deploy
 

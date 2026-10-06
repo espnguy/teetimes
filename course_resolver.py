@@ -438,7 +438,7 @@ def _resolve_golfnow(url: str, platform: str, force: bool = False) -> dict:
 
     # Fetch page once — reuse for both name and ObjectId extraction
     from golfnow_client import new_session
-    session = new_session()
+    session = new_session(use_proxy=True)
     resp = None
     try:
         resp = session.get(url, timeout=15)

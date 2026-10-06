@@ -432,6 +432,9 @@ class TeeTimeScheduler:
                                   f"without it. ({client.login_error})")
 
             now_str = datetime.now().strftime("%H:%M:%S")
+            # "direct" / "via proxy host:port" for the platforms that can use one
+            via = getattr(getattr(client, "session", None), "via", "")
+            via = f" ({via})" if via else ""
             db.update_job_fields(job_id, {
                 "last_polled":     datetime.now(),
                 "available_times": times,
@@ -444,7 +447,7 @@ class TeeTimeScheduler:
                     "available_times": times,
                 })
                 self._log(job_id,
-                    f"🟢 [{now_str}] {len(times)} time(s) available! "
+                    f"🟢 [{now_str}] {len(times)} time(s) available{via}! "
                     f"Earliest: {times[0].get('time')}"
                 )
                 if not already_notified:
@@ -471,7 +474,7 @@ class TeeTimeScheduler:
                         "status": "polling",
                         "notification_sent": False,
                     })
-                self._log(job_id, f"⏳ [{now_str}] No times in window yet.")
+                self._log(job_id, f"⏳ [{now_str}] No times in window yet{via}.")
 
         except PermissionError as e:
             self._log(job_id, f"🔑 Auth error: {e}")

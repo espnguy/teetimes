@@ -11,8 +11,10 @@ No login required to fetch available tee times — GolfNow's API is public.
 Endpoints discovered via DevTools on teeitup.golf booking pages.
 """
 
+import os
 import re
 import logging
+import secrets
 import requests
 from datetime import datetime
 from urllib.parse import urlparse, parse_qs
@@ -51,21 +53,52 @@ except ImportError:  # local dev without curl_cffi installed
     _cffi_requests = None
 
 
-def new_session():
+def proxy_url() -> str:
     """
-    An HTTP session for GolfNow / TeeItUp.
+    The residential proxy for GolfNow/TeeItUp traffic, from the PROXY_URL env var.
+
+    GolfNow's Cloudflare blocks cloud hosts (Railway) by address, so these
+    requests have to leave from a home connection. Residential providers give
+    one gateway URL and rotate the exit IP themselves. A literal "{session}" in
+    the URL is replaced per session with a random id, for providers that pin
+    ("sticky") an IP to a session id in the username — one session then keeps
+    one IP, e.g. through a snipe burst, and the next poll gets a fresh one.
+    """
+    url = os.environ.get("PROXY_URL", "").strip()
+    if "{session}" in url:
+        url = url.replace("{session}", secrets.token_hex(4))
+    return url
+
+
+def describe_proxy(url: str) -> str:
+    """host:port of a proxy URL, never its credentials — safe for logs."""
+    p = urlparse(url)
+    return f"{p.hostname}:{p.port}" if p.hostname else "proxy"
+
+
+def new_session(use_proxy: bool = False):
+    """
+    An HTTP session for GolfNow / TeeItUp (and Purpose Golf).
 
     GolfNow sits behind Cloudflare, which 403s plain python-requests from cloud
     hosts. curl_cffi makes the TLS/HTTP2 handshake look like real Chrome.
     Falls back to requests (with our spoofed headers) if curl_cffi is missing.
+
+    use_proxy routes it through PROXY_URL when that is set. The session's
+    `.via` says which route it took, for the job log.
     """
+    proxy = proxy_url() if use_proxy else ""
+    proxies = {"http": proxy, "https": proxy} if proxy else None
     if _cffi_requests is not None:
-        session = _cffi_requests.Session(impersonate="chrome")
+        session = _cffi_requests.Session(impersonate="chrome", proxies=proxies)
         session.headers.update(
             {k: v for k, v in HEADERS.items() if k not in _BROWSER_ID_HEADERS})
-        return session
-    session = requests.Session()
-    session.headers.update(HEADERS)
+    else:
+        session = requests.Session()
+        session.headers.update(HEADERS)
+        if proxies:
+            session.proxies.update(proxies)
+    session.via = f"via proxy {describe_proxy(proxy)}" if proxy else "direct"
     return session
 
 
@@ -98,7 +131,7 @@ def find_teeitup_alias(facility_id: str, candidates: list[str]) -> str:
     The alias usually equals the GolfNow URL slug ("pecan-hollow-golf-course");
     verify it, since a wrong alias errors rather than returning nothing.
     """
-    session = new_session()
+    session = new_session(use_proxy=True)
     for alias in dict.fromkeys(c for c in candidates if c):
         try:
             if any(str(f["id"]) == str(facility_id) for f in kenna_facilities(session, alias)):
@@ -177,7 +210,7 @@ class GolfNowClient:
     """
 
     def __init__(self):
-        self.session = new_session()
+        self.session = new_session(use_proxy=True)
         self._golfnow_session_ready = False
 
     def fetch_tee_times(
@@ -203,19 +236,35 @@ class GolfNowClient:
             api_date = date
 
         be_alias = kwargs.get("be_alias", "")
-        if platform == "teeitup" or be_alias:
-            # GolfNow courses with a TeeItUp site go this way too: golfnow.com
-            # itself blocks cloud servers.
-            all_times = self._fetch_teeitup(course_id, api_date, players, holes, be_alias=be_alias)
-        else:
+
+        def fetch():
+            if platform == "teeitup" or be_alias:
+                # GolfNow courses with a TeeItUp site go this way too.
+                return self._fetch_teeitup(course_id, api_date, players, holes, be_alias=be_alias)
+            return self._fetch_golfnow(course_id, api_date, players, holes)
+
+        try:
+            all_times = fetch()
+        except Exception as e:
+            if "403" not in str(e):
+                raise
+            if not proxy_url():
+                raise RuntimeError(
+                    "GolfNow blocks this server's address (403). Set PROXY_URL in "
+                    "Railway to a residential proxy so GolfNow/TeeItUp requests "
+                    "leave from a home connection.")
+            # A rotating proxy hands a new connection a new exit IP — one retry.
+            logger.warning(f"403 {self.session.via}; retrying on a fresh exit IP")
+            self.session = new_session(use_proxy=True)
+            self._golfnow_session_ready = False
             try:
-                all_times = self._fetch_golfnow(course_id, api_date, players, holes)
-            except Exception as e:
-                if "403" in str(e):
+                all_times = fetch()
+            except Exception as e2:
+                if "403" in str(e2):
                     raise RuntimeError(
-                        "GolfNow blocks this server (403). Click ↻ on the saved course "
-                        "so it can switch to the course's TeeItUp feed, then re-add the "
-                        "watch — or paste the course's book.teeitup.golf URL instead.")
+                        f"GolfNow blocked two exit IPs from the proxy (403, "
+                        f"{self.session.via}). Check the proxy is residential, not "
+                        f"datacenter, and that it is set to rotate.")
                 raise
 
         # Filter by time window and player count
@@ -245,7 +294,7 @@ class GolfNowClient:
             filtered.append(slot)
 
         logger.info(
-            f"GolfNow: fetched {len(all_times)} times for facility {course_id} "
+            f"GolfNow: fetched {len(all_times)} times for facility {course_id} {self.session.via} "
             f"on {date}, {len(filtered)} in window {time_from}–{time_to}"
         )
         return filtered

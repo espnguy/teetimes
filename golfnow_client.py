@@ -104,7 +104,7 @@ def find_teeitup_alias(facility_id: str, candidates: list[str]) -> str:
             if any(str(f["id"]) == str(facility_id) for f in kenna_facilities(session, alias)):
                 return alias
         except Exception as e:
-            logger.debug(f"TeeItUp alias {alias} check failed: {e}")
+            logger.warning(f"TeeItUp alias {alias} check failed: {e}")
     return ""
 
 

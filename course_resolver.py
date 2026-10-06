@@ -57,6 +57,8 @@ def detect_platform(url: str) -> str:
         return "teeitup"
     if "golfnow.com" in url_lower:
         return "golfnow"
+    if "purposegolf.com" in url_lower:
+        return "purposegolf"
     if "foreupsoftware.com" in url_lower or "foreup" in url_lower:
         return "foreup"
     # Could be a course website — fetch page and check for embedded platforms
@@ -95,6 +97,8 @@ def resolve_course_from_url(url: str, force: bool = False) -> dict:
 
     if platform in ("teeitup", "golfnow"):
         return _resolve_golfnow(clean_url, platform, force=force)
+    if platform == "purposegolf":
+        return _resolve_purposegolf(clean_url, force=force)
 
     # Unknown — fetch the page and look for embedded booking platform links
     if platform == "unknown":
@@ -106,7 +110,8 @@ def resolve_course_from_url(url: str, force: bool = False) -> dict:
             "Please paste the direct booking page URL instead:\n"
             "• ForeUp: https://foreupsoftware.com/index.php/booking/NNNNN\n"
             "• GolfNow: https://www.golfnow.com/tee-times/facility/NNNNN-course-name\n"
-            "• TeeItUp: https://course-name.book.teeitup.golf/tee-times"
+            "• TeeItUp: https://course-name.book.teeitup.golf/tee-times\n"
+            "• Purpose Golf: https://booking.purposegolf.com/courses/CourseName/N/teetimes"
         )
 
     from foreup_client import parse_course_url
@@ -254,6 +259,7 @@ PLATFORM_PATTERNS = (
     ("teeitup",    r'[\w-]+\.book\.teeitup\.(?:golf|com)[^\s"\'<>]*'),
     ("teeitup",    r'book\.teeitup\.(?:golf|com)[^\s"\'<>]*'),
     ("golfnow",    r'golfnow\.com/tee-times/facility/\d+[^\s"\'<>]*'),
+    ("purposegolf", r'booking\.purposegolf\.com/courses/[\w-]+/\d+[^\s"\'<>]*'),
     # Recognised but not supported yet — naming them beats a bare "unknown".
     ("chronogolf", r'chronogolf\.com/(?:widgets?|club)/[\w/-]+'),
     ("chronogolf", r'chronogolfSettings|chronogolf-js'),
@@ -377,6 +383,11 @@ def _detect_from_page(url: str) -> dict:
                 "golfnow"
             )
 
+        # Look for a Purpose Golf booking link
+        m = re.search(r'booking\.purposegolf\.com/courses/[\w-]+/\d+', html)
+        if m:
+            return _resolve_purposegolf(f"https://{m.group(0)}/teetimes")
+
         # Look for ForeUp embed
         m = re.search(r'foreupsoftware\.com/index\.php/booking/(\d+)', html)
         if m:
@@ -482,6 +493,53 @@ def _resolve_golfnow(url: str, platform: str, force: bool = False) -> dict:
     }
     db.save_course(kenna_id, result)
     logger.info(f"Saved GolfNow course {kenna_id}: {name} (alias={be_alias})")
+    return result
+
+
+def _resolve_purposegolf(url: str, force: bool = False) -> dict:
+    """Resolve a Purpose Golf course URL. The feed needs only the numeric id."""
+    from purposegolf_client import parse_purposegolf_url
+    info = parse_purposegolf_url(url)
+    course_id = info["course_id"]
+
+    courses = db.load_courses()
+    saved = courses.get(course_id)
+    if saved and not force and saved.get("platform") == "purposegolf":
+        logger.info(f"Using saved Purpose Golf course {course_id}: {saved.get('name')}")
+        return saved
+
+    # "SherrillParkCourse2" → "Sherrill Park Course 2" until the page says better
+    name = re.sub(r"(?<=[a-z])(?=[A-Z0-9])", " ", info["slug"])
+    try:
+        from golfnow_client import new_session
+        html = new_session().get(info["url"], timeout=15).text
+        m = re.search(r"<title>([^<]+)</title>", html, re.IGNORECASE)
+        if m:
+            # "Sherrill Park #2 Online Tee Times - Purpose Golf" → "Sherrill Park #2"
+            cleaned = re.sub(r"\s*(Online\s+)?Tee\s+Times.*$", "", m.group(1).strip(),
+                             flags=re.IGNORECASE).strip()
+            if cleaned and not re.search(r"attention required|just a moment|cloudflare",
+                                         cleaned, re.IGNORECASE):
+                name = cleaned
+    except Exception as e:
+        logger.warning(f"Could not fetch Purpose Golf page for name: {e}")
+
+    result = {
+        "course_id":        course_id,
+        "schedule_id":      course_id,
+        "booking_class":    "",
+        "name":             name,
+        "url":              info["url"],
+        "platform":         "purposegolf",
+        "be_alias":         "",
+        "booking_classes":  [],
+        # Release time not known yet, so snipe mode is refused for these.
+        "online_open_time": "",
+        "timezone":         "America/Chicago",
+        "resolver_version": RESOLVER_VERSION,
+    }
+    save_course(course_id, result)
+    logger.info(f"Saved Purpose Golf course {course_id}: {name}")
     return result
 
 

@@ -260,7 +260,7 @@
       </div>
 
       <div class="form-row">
-        <label>Booking URL <span style="font-weight:400;color:var(--gray)">(ForeUp or GolfNow/TeeItUp)</span></label>
+        <label>Booking URL <span style="font-weight:400;color:var(--gray)">(ForeUp, GolfNow/TeeItUp or Purpose Golf)</span></label>
         <input id="courseUrl" type="url" placeholder="https://foreupsoftware.com/index.php/booking/19536  or  https://course.book.teeitup.golf"
                oninput="onCourseUrlChange()">
         <div id="courseInfo" style="font-size:.78rem;margin-top:4px"></div>
@@ -352,7 +352,7 @@
     <div class="card">
       <h2>ℹ️ How it works</h2>
       <ol style="padding-left:18px;line-height:2;font-size:.9rem;color:var(--gray)">
-        <li>Enter your <strong>booking URL</strong> — ForeUp or GolfNow/TeeItUp</li>
+        <li>Enter your <strong>booking URL</strong> — ForeUp, GolfNow/TeeItUp or Purpose Golf</li>
         <li>Set your <strong>target date and preferred time window</strong></li>
         <li>Click <strong>"Start Watching"</strong> — the server polls every 2 min</li>
         <li>When a tee time appears, the job turns <span style="color:#15803d;font-weight:700">green</span></li>
@@ -401,6 +401,8 @@
               {% if job.status == 'available' %}
               {% if job.platform in ['teeitup', 'golfnow'] %}
               <a class="btn btn-confirm btn-sm" href="https://book.teeitup.golf/tee-times?facilityId={{ job.course_id }}" target="_blank">🏌️ Book on GolfNow →</a>
+              {% elif job.platform == 'purposegolf' %}
+              <a class="btn btn-confirm btn-sm" href="{{ job.course_url }}" target="_blank" rel="noopener">🏌️ Book on Purpose Golf →</a>
               {% else %}
               <a class="btn btn-confirm btn-sm" href="https://foreupsoftware.com/index.php/booking/{{ job.course_id }}#/teetimes" target="_blank">🏌️ Book on ForeUp →</a>
               {% endif %}
@@ -984,6 +986,8 @@ function renderJob(job) {
         ${job.status === 'available' ?
           (job.platform === 'teeitup' || job.platform === 'golfnow'
             ? `<a class="btn btn-confirm btn-sm" href="https://book.teeitup.golf/tee-times?facilityId=${job.course_id}" target="_blank">🏌️ Book on GolfNow →</a>`
+            : job.platform === 'purposegolf'
+            ? `<a class="btn btn-confirm btn-sm" href="${escHtml(job.course_url || '')}" target="_blank" rel="noopener">🏌️ Book on Purpose Golf →</a>`
             : `<a class="btn btn-confirm btn-sm" href="https://foreupsoftware.com/index.php/booking/${job.course_id}#/teetimes" target="_blank">🏌️ Book on ForeUp →</a>`)
           : ''}
         <button class="btn btn-outline btn-sm" onclick="toggleLog('${job.id}')">Logs</button>

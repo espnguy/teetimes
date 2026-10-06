@@ -385,6 +385,9 @@ class TeeTimeScheduler:
         if job.get("platform", "foreup") in ("teeitup", "golfnow"):
             from golfnow_client import GolfNowClient
             return GolfNowClient()
+        if job.get("platform") == "purposegolf":
+            from purposegolf_client import PurposeGolfClient
+            return PurposeGolfClient()
         return ForeUpClient(cfg.get("email"), cfg.get("password"))
 
     @staticmethod

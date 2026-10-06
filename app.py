@@ -11,6 +11,7 @@ from course_resolver import resolve_course_from_url, RESOLVER_VERSION
 from scheduler import TeeTimeScheduler
 from notifier import notify_test
 from release import compute_release, describe
+from sniper import sniper_js
 import discovery
 import db
 
@@ -225,6 +226,58 @@ def add_job():
     except Exception as e:
         logger.exception("add_job failed")
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/jobs/<job_id>/release_hold", methods=["POST"])
+def release_hold(job_id):
+    """
+    Hand a parked tee time back to the sheet so the user can book it.
+
+    Time-critical: the slot is open to everyone the moment this returns, so the
+    response carries the booking link the caller should already be sitting on.
+    """
+    try:
+        parked = scheduler.release_hold(job_id)
+        job = scheduler.get_job(job_id) or {}
+        return jsonify({
+            "success": True,
+            "hold": parked,
+            "booking_url": ForeUpClient.booking_url(
+                job.get("course_id", ""), job.get("target_date", ""),
+                int(job.get("players", 2) or 2)),
+        })
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 404
+    except Exception as e:
+        logger.exception(f"release_hold failed for {job_id}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/jobs/<job_id>/sniper")
+def job_sniper(job_id):
+    """
+    The in-browser sniper for this watch.
+
+    A hold placed server-side is scoped to the server's ForeUp session and reads
+    as unavailable in your own browser, so the hold has to run in your tab. This
+    returns a self-contained script to paste into the console there.
+    """
+    job = scheduler.get_job(job_id)
+    if not job:
+        return jsonify({"error": "Job not found"}), 404
+    if job.get("platform", "foreup") != "foreup":
+        return jsonify({"error": "The browser sniper only supports ForeUp courses."}), 400
+
+    snipe_at = job.get("snipe_at")
+    release_iso = snipe_at if isinstance(snipe_at, str) else (
+        snipe_at.isoformat() if snipe_at else None)
+
+    return jsonify({
+        "script":      sniper_js(job, release_iso),
+        "booking_url": ForeUpClient.booking_url(
+            job["course_id"], job["target_date"], int(job["players"])),
+        "release":     release_iso,
+    })
 
 
 @app.route("/api/remove_job/<job_id>", methods=["DELETE"])

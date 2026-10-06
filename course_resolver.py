@@ -412,7 +412,9 @@ def _resolve_golfnow(url: str, platform: str, force: bool = False) -> dict:
     courses = db.load_courses()
     if facility_id in courses and not force:
         saved = courses[facility_id]
-        if _is_current(saved):
+        # A GolfNow row without a TeeItUp alias polls golfnow.com, which 403s
+        # the server — look again rather than trust it.
+        if _is_current(saved) and (saved.get("be_alias") or platform != "golfnow"):
             logger.info(f"Using saved GolfNow course {facility_id}: {saved.get('name')}")
             return saved
         logger.info(f"Saved GolfNow course {facility_id} is stale — re-detecting.")
@@ -480,6 +482,16 @@ def _resolve_golfnow(url: str, platform: str, force: bool = False) -> dict:
                 be_alias = _parsed.netloc.split(".book.")[0]
         except Exception as e:
             logger.warning(f"Could not extract Kenna ObjectId: {e}")
+
+    # golfnow.com's search API 403s cloud servers, but most GolfNow courses
+    # also have a TeeItUp site, whose feed doesn't. Find and verify its alias.
+    if platform == "golfnow" and facility_id.isdigit():
+        from golfnow_client import find_teeitup_alias
+        slug = gn_match.group(1).lower() if gn_match else ""
+        be_alias = find_teeitup_alias(facility_id, [
+            slug, re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")])
+        logger.info(f"GolfNow facility {facility_id}: TeeItUp alias "
+                    f"{be_alias or 'not found — will use golfnow.com'}")
 
     result = {
         "course_id":     kenna_id,      # Kenna ObjectId for the API

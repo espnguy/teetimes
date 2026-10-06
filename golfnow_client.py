@@ -69,6 +69,45 @@ def new_session():
     return session
 
 
+KENNA = "https://phx-api-be-east-1b.kenna.io"
+
+
+def _kenna_headers(alias: str) -> dict:
+    return request_headers(**{
+        "Accept":     "application/json",
+        "Origin":     f"https://{alias}.book.teeitup.golf",
+        "Referer":    f"https://{alias}.book.teeitup.golf/",
+        "X-Be-Alias": alias,
+    })
+
+
+def kenna_facilities(session, alias: str) -> list[dict]:
+    """The facilities behind a TeeItUp booking site, or [] if the alias doesn't exist."""
+    resp = session.get(f"{KENNA}/alias/{alias}/facilities",
+                       headers=_kenna_headers(alias), timeout=15)
+    if resp.status_code == 404:
+        return []
+    resp.raise_for_status()
+    data = resp.json()
+    return [f for f in data if isinstance(f, dict) and f.get("id")] if isinstance(data, list) else []
+
+
+def find_teeitup_alias(facility_id: str, candidates: list[str]) -> str:
+    """
+    The TeeItUp alias whose booking site serves this GolfNow facility, or "".
+    The alias usually equals the GolfNow URL slug ("pecan-hollow-golf-course");
+    verify it, since a wrong alias errors rather than returning nothing.
+    """
+    session = new_session()
+    for alias in dict.fromkeys(c for c in candidates if c):
+        try:
+            if any(str(f["id"]) == str(facility_id) for f in kenna_facilities(session, alias)):
+                return alias
+        except Exception as e:
+            logger.debug(f"TeeItUp alias {alias} check failed: {e}")
+    return ""
+
+
 def request_headers(**extra) -> dict:
     """Per-request headers for new_session(), without clobbering its browser identity."""
     base = HEADERS if _cffi_requests is None else {
@@ -163,12 +202,21 @@ class GolfNowClient:
         except ValueError:
             api_date = date
 
-        if platform == "teeitup":
-            # be_alias is the subdomain slug for X-Be-Alias header
-            be_alias = kwargs.get("be_alias", "")
+        be_alias = kwargs.get("be_alias", "")
+        if platform == "teeitup" or be_alias:
+            # GolfNow courses with a TeeItUp site go this way too: golfnow.com
+            # itself blocks cloud servers.
             all_times = self._fetch_teeitup(course_id, api_date, players, holes, be_alias=be_alias)
         else:
-            all_times = self._fetch_golfnow(course_id, api_date, players, holes)
+            try:
+                all_times = self._fetch_golfnow(course_id, api_date, players, holes)
+            except Exception as e:
+                if "403" in str(e):
+                    raise RuntimeError(
+                        "GolfNow blocks this server (403). Click ↻ on the saved course "
+                        "so it can switch to the course's TeeItUp feed, then re-add the "
+                        "watch — or paste the course's book.teeitup.golf URL instead.")
+                raise
 
         # Filter by time window and player count
         from_min = _time_to_minutes(time_from)
@@ -178,6 +226,11 @@ class GolfNowClient:
         for slot in all_times:
             slot_min = _parse_slot_time(slot.get("time", ""))
             if slot_min is None or not (from_min <= slot_min <= to_min):
+                continue
+            # TeeItUp says exactly which group sizes a time takes and how many are left
+            if slot.get("allowed_players") and players not in slot["allowed_players"]:
+                continue
+            if "allowed_players" in slot and slot.get("available_spots", 4) < players:
                 continue
             # Filter by player count — check if requested count is in allowed group sizes
             player_rule = slot.get("rate_type", "")  # e.g. "TwoFour", "Two", "TwoThreeFour"
@@ -206,33 +259,35 @@ class GolfNowClient:
         be_alias: str = "",
     ) -> list[dict]:
         """
-        Fetch from TeeItUp (powered by Kenna/Lightspeed Golf).
+        Fetch from TeeItUp (Kenna), the booking engine GolfNow runs for courses.
 
-        Confirmed endpoint (from DevTools):
-          GET https://phx-api-be-east-1b.kenna.io/course/{objectId}/tee-time/locks?localDate=YYYY-MM-DD
-          Headers: X-Be-Alias: {subdomain-slug}  (e.g. "pecan-hollow-golf-course")
-                   Origin/Referer: https://{slug}.book.teeitup.golf
+        Confirmed from DevTools on pecan-hollow-golf-course.book.teeitup.golf:
+          GET {KENNA}/alias/{alias}/facilities              → numeric ids + timezone
+          GET {KENNA}/v2/tee-times?date=YYYY-MM-DD&facilityIds=1307
+          Header X-Be-Alias: {alias} — required, and must belong to the facility.
 
-        facility_id should be the 24-char hex Kenna ObjectId, stored during course resolution.
-        be_alias is the subdomain slug used in X-Be-Alias header.
+        This also serves GolfNow courses: golfnow.com's own search API 403s
+        requests from cloud hosts, this one doesn't. (The old /tee-time/locks
+        endpoint lists times sitting in someone's cart, not open ones.)
         """
-        kenna_base = "https://phx-api-be-east-1b.kenna.io"
         alias = be_alias or facility_id
+        facilities = kenna_facilities(self.session, alias)
+        if not facilities:
+            raise ValueError(f"TeeItUp has no booking site '{alias}' — re-detect the course.")
+        ids = [str(f["id"]) for f in facilities]
+        if str(facility_id) in ids:
+            ids = [str(facility_id)]
+        tz = facilities[0].get("timeZone") or "America/Chicago"
 
-        kenna_headers = request_headers(**{
-            "Origin":     f"https://{alias}.book.teeitup.golf",
-            "Referer":    f"https://{alias}.book.teeitup.golf/",
-            "X-Be-Alias": alias,
-        })
-
-        url = f"{kenna_base}/course/{facility_id}/tee-time/locks"
-        params = {"localDate": date}
-
-        resp = self.session.get(url, params=params, headers=kenna_headers, timeout=15)
+        resp = self.session.get(
+            f"{KENNA}/v2/tee-times",
+            params={"date": date, "facilityIds": ",".join(ids)},
+            headers=_kenna_headers(alias),
+            timeout=15,
+        )
         resp.raise_for_status()
-        data = resp.json()
-        slots = self._normalize_kenna(data)
-        logger.info(f"TeeItUp/Kenna: got {len(slots)} slots from {url}")
+        slots = self._normalize_kenna(resp.json(), tz)
+        logger.info(f"TeeItUp/Kenna: got {len(slots)} slots for {alias} ({','.join(ids)}) on {date}")
         return slots
 
     def _ensure_golfnow_session(self, facility_id: str):
@@ -354,51 +409,35 @@ class GolfNowClient:
             })
         return slots
 
-    def _normalize_kenna(self, data) -> list[dict]:
+    def _normalize_kenna(self, data, tz_name: str) -> list[dict]:
         """
-        Normalize Kenna/TeeItUp response.
-        Confirmed response shape from DevTools:
-          The /course/{id}/tee-time/locks endpoint returns a list of lock objects.
+        Normalize a Kenna v2/tee-times response:
+          [{courseId, teetimes: [{teetime: "2026-10-09T21:37:00.000Z",
+                                  maxPlayers, bookedPlayers,
+                                  rates: [{allowedPlayers: [2, 4], holes, greenFeeCart}]}]}]
+        Times are UTC; convert to the course's own clock like the other platforms.
         """
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo(tz_name)
         slots = []
-        # Response may be a list directly or wrapped in a key
-        items = []
-        if isinstance(data, list):
-            items = data
-        elif isinstance(data, dict):
-            items = (data.get("teeTimes") or data.get("locks") or
-                     data.get("data") or data.get("results") or [])
-
-        for item in items:
-            # Extract time — try various field names
-            time_str = (
-                item.get("localTime") or item.get("startTime") or
-                item.get("time") or item.get("localStartTime") or
-                item.get("teeTime") or ""
-            )
-            # If time is just HH:MM, prefix with date
-            if time_str and len(time_str) <= 8 and ":" in time_str:
-                date_val = item.get("localDate") or item.get("date") or ""
-                if date_val:
-                    time_str = f"{date_val} {time_str}"
-
-            spots = (
-                item.get("availableSpots") or item.get("available_spots") or
-                item.get("openSpots") or item.get("maxPlayers") or
-                item.get("spotsAvailable") or 0
-            )
-            fee = (
-                item.get("greenFee") or item.get("green_fee") or
-                item.get("price") or item.get("rate") or 0
-            )
-            slots.append({
-                "time":            time_str,
-                "available_spots": spots,
-                "green_fee":       fee,
-                "holes":           item.get("holes") or 18,
-                "rate_type":       item.get("rateType") or "",
-                "_raw":            item,
-            })
+        for day in data if isinstance(data, list) else []:
+            for item in day.get("teetimes") or []:
+                try:
+                    utc = datetime.fromisoformat(item["teetime"].replace("Z", "+00:00"))
+                except (KeyError, ValueError):
+                    continue
+                rates = item.get("rates") or []
+                allowed = sorted({n for r in rates for n in (r.get("allowedPlayers") or [])})
+                fees = [r.get("greenFeeCart") or r.get("greenFeeWalking") or 0 for r in rates]
+                slots.append({
+                    "time":            utc.astimezone(tz).strftime("%Y-%m-%d %H:%M"),
+                    "available_spots": (item.get("maxPlayers") or 4) - (item.get("bookedPlayers") or 0),
+                    "allowed_players": allowed,
+                    "green_fee":       (min(f for f in fees if f) / 100) if any(fees) else 0,
+                    "holes":           (rates[0].get("holes") if rates else None) or 18,
+                    "rate_type":       "",
+                    "_raw":            item,
+                })
         return slots
 
     def _normalize_golfnow(self, data) -> list[dict]:

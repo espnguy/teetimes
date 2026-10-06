@@ -397,10 +397,16 @@ def _resolve_golfnow(url: str, platform: str, force: bool = False) -> dict:
             name = subdomain.replace("-", " ").title()
 
     # Fetch page once — reuse for both name and ObjectId extraction
+    from golfnow_client import new_session
+    session = new_session()
     resp = None
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=15)
+        resp = session.get(url, timeout=15)
         m = re.search(r'<title>([^<]+)</title>', resp.text, re.IGNORECASE)
+        # A Cloudflare block/challenge page is not the course — keep the URL-derived name
+        if m and re.search(r"attention required|just a moment|cloudflare", m.group(1), re.IGNORECASE):
+            logger.warning(f"GolfNow page for {facility_id} was a Cloudflare page (status {resp.status_code})")
+            m = None
         if m:
             raw_name = m.group(1).strip()
             # Strip trailing platform names
@@ -419,7 +425,7 @@ def _resolve_golfnow(url: str, platform: str, force: bool = False) -> dict:
     if platform == "teeitup":
         try:
             if not resp:
-                resp = requests.get(url, headers=HEADERS, timeout=15)
+                resp = session.get(url, timeout=15)
             # Look for the ObjectId in the page JS bundles/config
             m = re.search(r'"courseId"\s*:\s*"([a-f0-9]{24})"', resp.text)
             if not m:

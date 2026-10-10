@@ -3,6 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#2d6a4f">
 <title>⛳ Tee Time Booker</title>
 <style>
   :root {
@@ -143,9 +144,19 @@
     .container { padding: 16px 12px; }
     .grid-2 { gap: 16px; }
     .card { padding: 16px; }
-    /* even spacing between top-level sections (overrides inline margins) */
+    /* On a phone, what you check most comes first: your watches, then the
+       add form; setup-type sections drop to the bottom. */
+    .container { display: flex; flex-direction: column; gap: 16px; }
     .container > * { margin: 0 !important; }
-    .container > * + * { margin-top: 16px !important; }
+    .sec-jobs     { order: 1; }
+    .sec-add      { order: 2; }
+    .sec-discover { order: 3; }
+    .sec-courses  { order: 4; }
+    .sec-settings { order: 5; }
+    .sec-howto    { display: none; }
+    .discover-row { flex-wrap: nowrap !important; }
+    .discover-field { flex: 1 1 0 !important; min-width: 0; }
+    .discover-row .btn { padding: 10px 14px; }
     /* 16px stops iOS Safari zooming the page when a field is focused */
     input, select { font-size: 16px; padding: 10px 12px; }
     .btn { padding: 11px 18px; }
@@ -157,6 +168,7 @@
     .modal { padding: 20px; width: calc(100% - 24px); max-height: 90vh; overflow-y: auto; }
     .modal-actions { flex-wrap: wrap; }
     .modal-actions .btn { flex: 1 1 auto; justify-content: center; }
+    .empty-state { padding: 20px 12px; }
     #toast { left: 12px; right: 12px; bottom: 16px; text-align: center; }
   }
 </style>
@@ -172,7 +184,7 @@
 <div class="container">
 
   <!-- Settings -->
-  <div class="card" style="margin-bottom:20px">
+  <div class="card sec-settings" style="margin-bottom:20px">
     <span class="settings-toggle" onclick="toggleSettings()">⚙️ Settings (credentials & defaults)</span>
     <div class="settings-section" id="settingsSection">
       {% if env_creds %}
@@ -250,24 +262,24 @@
   </div>
 
   <!-- Course discovery -->
-  <div class="card">
+  <div class="card sec-discover">
     <h2>🔎 Find Courses Near You</h2>
     <div style="font-size:.82rem;color:var(--gray);margin-bottom:12px">
       Enter a zip code to see nearby courses and which booking platform each uses.
       Supported ones can be watched with one click.
     </div>
-    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
-      <div style="flex:0 0 130px">
+    <div class="discover-row" style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+      <div class="discover-field" style="flex:0 0 130px">
         <label>Zip Code</label>
         <input id="discoverZip" type="text" inputmode="numeric" maxlength="5"
                placeholder="76051" onkeydown="if(event.key==='Enter')discoverCourses()">
       </div>
-      <div style="flex:0 0 130px">
+      <div class="discover-field" style="flex:0 0 130px">
         <label>Radius</label>
         <select id="discoverRadius">
-          <option value="10">10 miles</option>
-          <option value="25" selected>25 miles</option>
-          <option value="50">50 miles</option>
+          <option value="10">10 mi</option>
+          <option value="25" selected>25 mi</option>
+          <option value="50">50 mi</option>
         </select>
       </div>
       <button class="btn btn-outline" onclick="discoverCourses()" id="discoverBtn"
@@ -276,7 +288,7 @@
     <div id="discoverResults" style="margin-top:14px"></div>
   </div>
 
-  <div class="grid-2">
+  <div class="grid-2 sec-add">
 
     <!-- Add Job Form -->
     <div class="card">
@@ -380,7 +392,7 @@
     </div>
 
 <!-- How it works -->
-    <div class="card">
+    <div class="card sec-howto">
       <h2>ℹ️ How it works</h2>
       <ol style="padding-left:18px;line-height:2;font-size:.9rem;color:var(--gray)">
         <li>Enter your <strong>booking URL</strong> — ForeUp, GolfNow/TeeItUp or Purpose Golf</li>
@@ -397,7 +409,7 @@
   </div>
 
   <!-- Jobs List -->
-  <div class="card" style="margin-top:20px">
+  <div class="card sec-jobs" style="margin-top:20px">
     <h2>🔍 Active Watches</h2>
     <div id="jobsList">
       {% if jobs %}
@@ -452,13 +464,13 @@
         </div>
         {% endfor %}
       {% else %}
-        <div class="empty-state">No watches yet. Add one above!</div>
+        <div class="empty-state">No watches yet — add one with the form.</div>
       {% endif %}
     </div>
   </div>
 
   <!-- Saved Courses -->
-  <div class="card" style="margin-top:20px">
+  <div class="card sec-courses" style="margin-top:20px">
     <h2>🏌️ Saved Courses</h2>
     <div id="coursesList">
       {% if courses %}
@@ -897,7 +909,7 @@ async function refreshJobs() {
     const jobs = await res.json();
     const el = document.getElementById('jobsList');
     if (jobs.length === 0) {
-      el.innerHTML = '<div class="empty-state">No watches yet. Add one above!</div>';
+      el.innerHTML = '<div class="empty-state">No watches yet — add one with the form.</div>';
       return;
     }
     el.innerHTML = jobs.map(renderJob).join('');
